@@ -1,284 +1,249 @@
 import './styles/base-layer.css';
 import './styles/happy-theme.css';
-import 'maplibre-gl/dist/maplibre-gl.css';
-import * as Sentry from '@sentry/browser';
+import { enqueueSentryCall, installPreInitErrorQueue, scheduleSentryInit } from '@/bootstrap/sentry-defer';
 import { inject } from '@vercel/analytics';
 import { App } from './App';
 import { installUtmInterceptor } from './utils/utm';
 
-const sentryDsn = import.meta.env.VITE_SENTRY_DSN?.trim();
+// perf G — defer @sentry/browser off the critical path (#3994).
+// The eager `Sentry.init({...})` previously ran here cost ~1.96 s of pre-LCP
+// CPU. Install a lightweight error-buffering queue synchronously so any error
+// thrown before the SDK lands is captured + flushed on init, then schedule
+// the actual SDK load via requestIdleCallback. The init options + SDK ship in
+// the deferred sentry-*.js chunk, not the main entry.
+installPreInitErrorQueue();
+scheduleSentryInit();
 
-// Initialize Sentry error tracking (early as possible)
-Sentry.init({
-  dsn: sentryDsn || undefined,
-  release: `worldmonitor@${__APP_VERSION__}`,
-  environment: location.hostname === 'worldmonitor.app' ? 'production'
-    : location.hostname.includes('vercel.app') ? 'preview'
-    : 'development',
-  enabled: Boolean(sentryDsn) && !location.hostname.startsWith('localhost') && !('__TAURI_INTERNALS__' in window),
-  sendDefaultPii: true,
-  tracesSampleRate: 0.1,
-  ignoreErrors: [
-    'Invalid WebGL2RenderingContext',
-    'WebGL context lost',
-    /imageManager/,
-    /ResizeObserver loop/,
-    /NotAllowedError/,
-    /InvalidAccessError/,
-    /importScripts/,
-    /^TypeError: Load failed( \(.*\))?$/,
-    /^TypeError: Failed to fetch( \(.*\))?$/,
-    /^TypeError: cancelled$/,
-    /^TypeError: NetworkError/,
-    /runtime\.sendMessage\(\)/,
-    /Java object is gone/,
-    /^Object captured as promise rejection with keys:/,
-    /Unable to load image/,
-    /Non-Error promise rejection captured with value:/,
-    /Connection to Indexed Database server lost/,
-    /webkit\.messageHandlers/,
-    /(?:unsafe-eval.*Content Security Policy|Content Security Policy.*unsafe-eval)/,
-    /Fullscreen request denied/,
-    /requestFullscreen/,
-    /webkitEnterFullscreen/,
-    /vc_text_indicators_context/,
-    /Program failed to link/,
-    /too much recursion/,
-    /zaloJSV2/,
-    /Java bridge method invocation error/,
-    /Could not compile fragment shader/,
-    /can't redefine non-configurable property/,
-    /Can.t find variable: (CONFIG|currentInset|NP|webkit|EmptyRanges|logMutedMessage|UTItemActionController|DarkReader|Readability|onPageLoaded|Game|frappe|getPercent|ucConfig|\$a)/,
-    /invalid origin/,
-    /\.data\.split is not a function/,
-    /signal is aborted without reason/,
-    /Failed to fetch dynamically imported module/,
-    /Importing a module script failed/,
-    /contentWindow\.postMessage/,
-    /Could not compile vertex shader/,
-    /objectStoreNames/,
-    /Unexpected identifier 'https'/,
-    /Can't find variable: _0x/,
-    /Can't find variable: video/,
-    /hackLocationFailed is not defined/,
-    /userScripts is not defined/,
-    /NS_ERROR_ABORT/,
-    /DataCloneError.*could not be cloned/,
-    /cannot decode message/,
-    /WKWebView was deallocated/,
-    /Unexpected end of(?: JSON)? input/,
-    /window\.android\.\w+ is not a function/,
-    /Attempted to assign to readonly property/,
-    /Cannot assign to read only property/,
-    /FetchEvent\.respondWith/,
-    /e\.toLowerCase is not a function/,
-    /\.trim is not a function/,
-    /\.(indexOf|findIndex) is not a function/,
-    /QuotaExceededError/,
-    /^TypeError: 已取消$/,
-    /Maximum call stack size exceeded/,
-    /^fetchError: Network request failed$/,
-    /window\.ethereum/,
-    /^SyntaxError: Unexpected token/,
-    /^Operation timed out\.?$/,
-    /setting 'luma'/,
-    /ML request .* timed out/,
-    /^Element not found$/,
-    /(?:AbortError: )?The operation was aborted\.?\s*$/,
-    /Unexpected end of script/,
-    /error loading dynamically imported module/,
-    /Style is not done loading/,
-    /Event `CustomEvent`.*captured as promise rejection/,
-    /getProgramInfoLog/,
-    /__firefox__/,
-    /ifameElement\.contentDocument/,
-    /Invalid video id/,
-    /Fetch is aborted/,
-    /Stylesheet append timeout/,
-    /Worker is not a constructor/,
-    /_pcmBridgeCallbackHandler/,
-    /UCShellJava/,
-    /Cannot define multiple custom elements/,
-    /maxTextureDimension2D/,
-    /Container app not found/,
-    /this\.St\.unref/,
-    /Invalid or unexpected token/,
-    /evaluating 'elemFound\.value'/,
-    /[Cc]an(?:'t|not) access (?:'\w+'|lexical declaration '\w+') before initialization/,
-    /^Uint8Array$/,
-    /createObjectStore/,
-    /The database connection is closing/,
-    /shortcut icon/,
-    /Attempting to change value of a readonly property/,
-    /reading 'nodeType'/,
-    /feature named .\w+. was not found/,
-    /a2z\.onStatusUpdate/,
-    /Attempting to run\(\), but is already running/,
-    /this\.player\.destroy is not a function/,
-    /isReCreate is not defined/,
-    /reading 'style'.*HTMLImageElement/,
-    /can't access property "write", \w+ is undefined/,
-    /AbortError: The user aborted a request/,
-    /\w+ is not a function.*\/uv\/service\//,
-    /__isInQueue__/,
-    /^(?:LIDNotify(?:Id)?|onWebViewAppeared|onGetWiFiBSSID) is not defined$/,
-    /signal timed out/,
-    /Se requiere plan premium/,
-    /hybridExecute is not defined/,
-    /reading 'postMessage'/,
-    /NotSupportedError/,
-    /appendChild.*Unexpected token/,
-    /\bmag is not defined\b/,
-    /evaluating '[^']*\.luma/,
-    /translateNotifyError/,
-    /GM_getValue/,
-    /^InvalidStateError:|The object is in an invalid state/,
-    /Could not establish connection\. Receiving end does not exist/,
-    /webkitCurrentPlaybackTargetIsWireless/,
-    /webkit(?:Supports)?PresentationMode/,
-    /Cannot redefine property: webdriver/,
-    /null is not an object \(evaluating '\w+\.theme'\)/,
-    /this\.player\.\w+ is not a function/,
-    /videoTrack\.configuration/,
-    /evaluating 'v\.setProps'/,
-    /button\[aria-label/,
-    /The fetching process for the media resource was aborted/,
-    /Invalid regular expression: missing/,
-    /WeixinJSBridge/,
-    /evaluating '\w+\.type'/,
-    /Policy with name .* already exists/,
-    /[sx]wbrowser is not defined/,
-    /browser\.storage\.local/,
-    /The play\(\) request was interrupted/,
-    /MutationEvent is not defined/,
-    /Cannot redefine property: userAgent/,
-    /st_framedeep|ucbrowser_script/,
-    /iabjs_unified_bridge/,
-    /DarkReader/,
-    /window\.receiveMessage/,
-    /Cross-origin script load denied/,
-    /orgSetInterval is not a function/,
-    /Blocked a frame with origin.*accessing a cross-origin frame/,
-    /SnapTube/,
-    /sortedTrackListForMenu/,
-    /isWhiteToBlack/,
-    /window\.videoSniffer/,
-    /closeTabMediaModal/,
-    /missing \) after argument list/,
-    /Error invoking postMessage: Java exception/,
-    /IndexSizeError/,
-    /Cannot add property \w+, object is not extensible/,
-    /Failed to construct 'Worker'.*cannot be accessed from origin/,
-    /undefined is not an object \(evaluating '(?:this\.)?media(?:Controller)?\.(?:duration|videoTracks|readyState|audioTracks|media)/,
-    /\$ is not defined/,
-    /Qt\(\) is not a function/,
-    /out of memory/,
-    /Could not connect to the server/,
-    /shaderSource must be an instance of WebGLShader/,
-    /Failed to initialize WebGL/,
-    /opacityVertexArray\.length/,
-    /Length of new data is \d+, which doesn't match current length of/,
-    /^AJAXError:.*(?:Load failed|Unauthorized|\(401\))/,
-    /^NetworkError: Load failed$/,
-    /^A network error occurred\.?$/,
-    /nmhCrx is not defined/,
-    /navigationPerformanceLoggerJavascriptInterface/,
-    /jQuery is not defined/,
-    /illegal UTF-16 sequence/,
-    /detectIncognito/,
-    /Cannot read properties of null \(reading '__uv'\)/,
-    /Can't find variable: p\d+/,
-    /^timeout$/,
-    /Can't find variable: caches/,
-    /crypto\.randomUUID is not a function/,
-    /ucapi is not defined/,
-    /Identifier '(?:script|reportPage|element)' has already been declared/,
-    /getAttribute is not a function.*getAttribute\("role"\)/,
-    /^TypeError: Internal error$/,
-    /SCDynimacBridge/,
-    /errTimes is not defined/,
-    /Failed to get ServiceWorkerRegistration/,
-    /^ReferenceError: Cannot access uninitialized variable\.?$/,
-    /Failed writing data to the file system/,
-    /Error invoking initializeCallbackHandler/,
-    /releasePointerCapture.*Invalid pointer/,
-    /Array buffer allocation failed/,
-    /Client can't handle this message/,
-    /Invalid LngLat object/,
-    /autoReset/,
-    /webkitExitFullScreen/,
-    /downProgCallback/,
-    /syncDownloadState/,
-    /^ReferenceError: HTMLOUT is not defined$/,
-    /^ReferenceError: xbrowser is not defined$/,
-    /LibraryDetectorTests_detect/,
-    /contentBoxSize\[0\] is undefined/,
-    /Attempting to run\(\), but is already running/,
-    /Out of range source coordinates for DEM data/,
-    /Invalid character: '\\0'/,
-    /Failed to execute 'unobserve' on 'IntersectionObserver'/,
-    /WKErrorDomain/,
-    /Content-Length header of network response exceeds response Body/,
-    /^Uncaught \[object ErrorEvent\]$/,
-    /trsMethod\w+ is not defined/,
-    /checkLogin is not a function/,
-    /VConsole is not defined/,
-    /exitFullscreen.*Document not active/,
-    /Force close delete origin/,
-  ],
-  beforeSend(event) {
-    const msg = event.exception?.values?.[0]?.value ?? '';
-    if (msg.length <= 3 && /^[a-zA-Z_$]+$/.test(msg)) return null;
-    const frames = event.exception?.values?.[0]?.stacktrace?.frames ?? [];
-    // Suppress maplibre internal null-access crashes (light, placement) only when stack is in map chunk
-    if (/this\.style\._layers|reading '_layers'|this\.(light|sky) is null|can't access property "(id|type|setFilter)"[,] ?\w+ is (null|undefined)|can't access property "(id|type)" of null|Cannot read properties of null \(reading '(id|type|setFilter|_layers)'\)|null is not an object \(evaluating '\w{1,3}\.(id|style)|^\w{1,2} is null$/.test(msg)) {
-      if (frames.some(f => /\/(map|maplibre|deck-stack)-[A-Za-z0-9_-]+\.js/.test(f.filename ?? ''))) return null;
-    }
-    // Suppress any TypeError that happens entirely within maplibre or deck.gl internals
-    const excType = event.exception?.values?.[0]?.type ?? '';
-    if ((excType === 'TypeError' || /^TypeError:/.test(msg)) && frames.length > 0) {
-      const nonSentryFrames = frames.filter(f => f.filename && f.filename !== '<anonymous>' && !/\/sentry-[A-Za-z0-9_-]+\.js/.test(f.filename));
-      if (nonSentryFrames.length > 0 && nonSentryFrames.every(f => /\/(map|maplibre|deck-stack)-[A-Za-z0-9_-]+\.js/.test(f.filename ?? ''))) return null;
-    }
-    // Suppress Three.js/globe.gl TypeError crashes in main bundle (reading 'type'/'pathType'/'count'/'__globeObjType' on undefined during WebGL traversal/raycast)
-    if (/reading '(?:type|pathType|count|__globeObjType)'|can't access property "(?:type|pathType|count|__globeObjType)",? \w+ is (?:undefined|null)|undefined is not an object \(evaluating '\w+\.(?:pathType|count|__globeObjType)'\)|null is not an object \(evaluating '\w+\.__globeObjType'\)/.test(msg)) {
-      const nonSentryFrames = frames.filter(f => f.filename && f.filename !== '<anonymous>' && !/\/sentry-[A-Za-z0-9_-]+\.js/.test(f.filename));
-      const hasSourceMapped = nonSentryFrames.some(f => /\.(ts|tsx)$/.test(f.filename ?? '') || /^src\//.test(f.filename ?? ''));
-      if (!hasSourceMapped) return null;
-    }
-    // Suppress minified Three.js/globe.gl crashes (e.g. "l is undefined" in raycast, "b is undefined" in update/initGlobe)
-    if (/^\w{1,2} is (?:undefined|not an object)$/.test(msg) && frames.length > 0) {
-      if (frames.some(f => /\/(main|index)-[A-Za-z0-9_-]+\.js/.test(f.filename ?? '') && /(raycast|update|initGlobe|traverse|render)/.test(f.function ?? ''))) return null;
-    }
-    // Suppress Three.js OrbitControls touch crashes (finger lifted during pinch-zoom)
-    if (/undefined is not an object \(evaluating 't\.x'\)|Cannot read properties of undefined \(reading 'x'\)/.test(msg)) {
-      const nonSentryFrames = frames.filter(f => f.filename && f.filename !== '<anonymous>' && !/\/sentry-[A-Za-z0-9_-]+\.js/.test(f.filename));
-      const hasSourceMapped = nonSentryFrames.some(f => /\.(ts|tsx)$/.test(f.filename ?? '') || /^src\//.test(f.filename ?? ''));
-      if (!hasSourceMapped) return null;
-    }
-    // Suppress deck.gl/maplibre null-access crashes with no usable stack trace (requestAnimationFrame wrapping)
-    if (/null is not an object \(evaluating '\w{1,3}\.(id|type|style)'\)/.test(msg) && frames.length === 0) return null;
-    // Suppress Safari sortedTrackListForMenu native crash (value is generic "Type error", function name in stack)
-    if (excType === 'TypeError' && frames.some(f => /sortedTrackListForMenu/.test(f.function ?? ''))) return null;
-    // Suppress TypeErrors from anonymous/injected scripts (no real source files or only inline page URL)
-    if ((excType === 'TypeError' || /^TypeError:/.test(msg)) && frames.length > 0 && frames.every(f => !f.filename || f.filename === '<anonymous>' || /^blob:/.test(f.filename) || /^https?:\/\/[^/]+\/?$/.test(f.filename))) return null;
-    // Suppress parentNode.insertBefore from injected/inline scripts (iOS WKWebView, Apple Mail)
-    if (/parentNode\.insertBefore/.test(msg) && frames.every(f => !f.filename || f.filename === '<anonymous>' || /^blob:/.test(f.filename) || /^https?:\/\/[^/]+\/?$/.test(f.filename))) return null;
-    // Suppress Sentry breadcrumb DOM-measuring crashes (element.offsetWidth on detached DOM)
-    if (/evaluating '(?:element|e)\.offset(?:Width|Height)'/.test(msg) && frames.some(f => /\/sentry-[A-Za-z0-9_-]+\.js/.test(f.filename ?? ''))) return null;
-    // Suppress errors originating entirely from blob: URLs (browser extensions)
-    if (frames.length > 0 && frames.every(f => /^blob:/.test(f.filename ?? ''))) return null;
-    // Suppress errors originating from UV proxy (Ultraviolet service worker)
-    if (frames.some(f => /\/uv\/service\//.test(f.filename ?? '') || /uv\.handler/.test(f.filename ?? ''))) return null;
-    // Suppress YouTube IFrame widget API internal errors
-    if (frames.some(f => /www-widgetapi\.js/.test(f.filename ?? ''))) return null;
-    return event;
-  },
-});
 // Suppress NotAllowedError from YouTube IFrame API's internal play() — browser autoplay policy,
 // not actionable. The YT IFrame API doesn't expose the play() promise so it leaks as unhandled.
 window.addEventListener('unhandledrejection', (e) => {
   if (e.reason?.name === 'NotAllowedError') e.preventDefault();
+});
+
+// CSP violation filter — exported for testability.
+// Returns true if the violation should be suppressed (not reported to Sentry).
+function shouldSuppressCspViolation(
+  disposition: string,
+  directive: string,
+  blockedURI: string,
+  sourceFile: string,
+  cspConnectSrcAllowsHttps: boolean,
+  firstPartyConvexHost: string | null,
+  cspMediaSrcAllowsHttps: boolean = false,
+): boolean {
+  // Skip non-enforced violations (report-only from dual-CSP interaction).
+  if (disposition && disposition !== 'enforce') return true;
+  // connect-src + HTTPS: only suppress when the page CSP actually allows https: scheme.
+  // This is scoped to the current policy state, not a blanket protocol assumption.
+  if (directive === 'connect-src' && cspConnectSrcAllowsHttps) {
+    try {
+      if (new URL(blockedURI).protocol === 'https:') return true;
+    } catch { /* scheme-only values like "blob" fall through */ }
+  }
+  // media-src + HTTPS: HLS / live-stream media-element loads. Our media-src
+  // policy allows the `https:` scheme (`media-src 'self' data: blob: https:` in
+  // BOTH the index.html meta tag and the vercel.json header), so an *enforced*
+  // https: media-src block means a corporate proxy / privacy extension stripped
+  // `https:` from the user's effective media-src — the same environmental policy
+  // mutation as the connect-src case above. The HLS *manifest* fetch is
+  // connect-src (already suppressed via the foxnews-style rule); this covers the
+  // media element load of that same stream. Built-in and user-added custom HLS
+  // channels (LiveNewsPanel) both hit this — WORLDMONITOR-HV (bloomberg.com
+  // us.m3u8, 4 users). Gated on policy detection so it stays scoped to the
+  // current policy state, not a blanket protocol assumption. http: media-src
+  // blocks (real mixed-content) still surface.
+  if (directive === 'media-src' && cspMediaSrcAllowsHttps) {
+    try {
+      if (new URL(blockedURI).protocol === 'https:') return true;
+    } catch { /* scheme-only values fall through */ }
+  }
+  // default-src + HTTP: mixed-content block on a fetch type we set no explicit
+  // directive for — i.e. browser link-prefetch ("Preload pages" speculation) or
+  // an extension article-prefetcher. News article links render as plain
+  // <a target="_blank"> navigations (NewsPanel/ClimateNewsPanel/etc.) carrying
+  // feed-supplied URLs; some sources / downgrading proxies emit them over http:,
+  // and the browser/extension speculatively fetches them — the load falls to the
+  // default-src fallback because we set no prefetch-src. Our app is HTTPS-only and
+  // ships no http:// subresource loads, and every fetch directive we DO use
+  // (connect-src, img-src, script-src, media-src) is set explicitly, so a genuine
+  // first-party mixed-content fetch surfaces under its specific directive — never
+  // this default-src fallback. Preserve first-party worldmonitor.app http blocks
+  // so a real mixed-content regression on our own assets still surfaces
+  // (WORLDMONITOR-S0 — http://www.euronews.com article prefetch, 1 user/775 ev).
+  if (directive === 'default-src') {
+    try {
+      const u = new URL(blockedURI);
+      if (u.protocol === 'http:'
+          && u.hostname !== 'worldmonitor.app'
+          && !u.hostname.endsWith('.worldmonitor.app')) return true;
+    } catch { /* scheme-only values fall through */ }
+  }
+  // First-party Convex backend: corporate proxies / privacy extensions that mutate the
+  // page CSP (stripping bare `https:` from connect-src) cause our Convex sync calls to
+  // be CSP-blocked even though our policy allows them. Suppress unconditionally for OUR
+  // configured Convex deployment hostname (`VITE_CONVEX_URL`) so we don't drown Sentry
+  // in 1M+ events/month from those users (WORLDMONITOR-HN). Convex is multi-tenant —
+  // do NOT suppress all `*.convex.cloud`, that would silently swallow blocks to foreign/
+  // attacker-controlled Convex projects. Match by exact hostname only. Real first-party
+  // CSP regressions on this host are caught by the staging deploy + uptime check.
+  if (directive === 'connect-src' && firstPartyConvexHost) {
+    try {
+      if (new URL(blockedURI).hostname === firstPartyConvexHost) return true;
+    } catch { /* scheme-only values fall through */ }
+  }
+  // First-party img-src block on OUR registrable domain: same pattern as the Convex
+  // connect-src case above. Corporate proxies / privacy extensions (Zscaler, Symantec
+  // CloudSOC, school content-filters) can strip both `'self'` and `https:` from img-src
+  // in the user's effective policy, causing our own favicon and panel icons to be
+  // CSP-blocked even though our policy (`img-src 'self' data: blob: https:`) allows
+  // them. Scope to `worldmonitor.app` and its subdomains — img-src blocks to foreign
+  // hosts (a third-party CDN we never load, attacker-controlled host) still surface
+  // (WORLDMONITOR-JP). Suffix check uses a leading `.` so lookalikes like
+  // `worldmonitor.app.evil.com` do NOT match.
+  //
+  // REQUIRE https: protocol — our CSP only allows https: for img-src, so a real
+  // mixed-content regression (`<img src="http://worldmonitor.app/...">`) would be
+  // blocked by the browser. Suppressing http: blocks on first-party hosts would mask
+  // that regression in Sentry. The `cspConnectSrcAllowsHttps` block above uses the
+  // same protocol gate for connect-src.
+  if (directive === 'img-src') {
+    try {
+      const url = new URL(blockedURI);
+      if (url.protocol === 'https:'
+          && (url.hostname === 'worldmonitor.app' || url.hostname.endsWith('.worldmonitor.app'))) return true;
+    } catch { /* scheme-only values fall through */ }
+  }
+  // YouTube IFrame API loader: explicitly allowed by our script-src
+  // (`https://www.youtube.com`), so a block here means a third party (extension,
+  // corporate proxy, in-app webview) mutated the policy. Not actionable — embedded
+  // video remains broken in that user's environment regardless of our code
+  // (WORLDMONITOR-HP).
+  if (
+    (directive === 'script-src-elem' || directive === 'script-src')
+    && /^https:\/\/www\.youtube\.com\/iframe_api(?:\?|$)/.test(blockedURI)
+  ) return true;
+  // Zscaler enterprise content-filter proxy: `gateway.zscloud.net` is injected into
+  // corporate users' frames by Zscaler's web filter agent. We never load it ourselves;
+  // it's inserted into the host page outside our control (WORLDMONITOR-HT). Match by
+  // parsed hostname so a `gateway.zscloud.net.evil.com` lookalike doesn't bypass the
+  // surrounding signal filters.
+  if (directive === 'frame-src') {
+    try {
+      if (new URL(blockedURI).hostname === 'gateway.zscloud.net') return true;
+    } catch { /* scheme-only values fall through */ }
+  }
+  // Browser extensions or injected scripts. `ms-browser-extension://` is Edge's
+  // scheme for legacy/internal extensions (WORLDMONITOR-JM).
+  if (/^(?:chrome|moz|safari(?:-web)?|ms-browser)-extension/.test(sourceFile) || /^(?:chrome|moz|safari(?:-web)?|ms-browser)-extension/.test(blockedURI)) return true;
+  // blob: — browsers report "blob" (scheme-only) or "blob:https://...".
+  if (blockedURI === 'blob' || /^blob:/.test(sourceFile) || /^blob:/.test(blockedURI)) return true;
+  // eval/inline/data.
+  if (blockedURI === 'eval' || blockedURI === 'inline' || blockedURI === 'data' || /^data:/.test(blockedURI)) return true;
+  // about: — browsers report "about" (scheme-only) or "about:blank" / "about:srcdoc"
+  // for iframes created by extensions, ad-injectors, or Smart TV browsers (Samsung
+  // Internet on Tizen). We never set frame src to about:* ourselves (WORLDMONITOR-JQ).
+  if (blockedURI === 'about' || /^about:/.test(blockedURI)) return true;
+  // Android WebView video poster injection.
+  if (blockedURI === 'android-webview-video-poster') return true;
+  // Own manifest.webmanifest — stale CSP cache hit.
+  if (/manifest\.webmanifest$/.test(blockedURI)) return true;
+  // Third-party injectors: Google Translate, Facebook Pixel.
+  if (/gstatic\.com\/_\/translate/.test(blockedURI) || /facebook\.net/.test(blockedURI)) return true;
+  // YouTube live stream manifests.
+  if (/googlevideo\.com|youtube\.com\/generate_204/.test(blockedURI)) return true;
+  // Corporate/school content filter injections.
+  if (/securly\.com|goguardian\.com|contentkeeper\.com/.test(blockedURI)) return true;
+  // Vercel Analytics script.
+  if (/_vercel\/insights\/script\.js/.test(blockedURI)) return true;
+  // Third-party stylesheet injection from public CDNs (browser extensions,
+  // bookmarklets, "inspect element" UI tools loading antd/bootstrap/etc.).
+  // We legitimately load JSON + JS from `cdn.jsdelivr.net` (world-atlas /
+  // us-atlas TopoJSON, chart.js in widget-sanitizer iframe), but never
+  // CSS — so a `style-src*` block on jsDelivr is by definition third-party
+  // injection (WORLDMONITOR-J0 — antd@4 CSS injection, 270 events / 26
+  // users on finance.worldmonitor.app).
+  if (/^style-src(-elem)?$/.test(directive) && /^https:\/\/cdn\.jsdelivr\.net\//.test(blockedURI)) return true;
+  // Inline script blocks from extensions/in-app browsers.
+  if (blockedURI === 'inline' && directive === 'script-src-elem') return true;
+  // Null blocked URI from in-app browsers.
+  if (blockedURI === 'null') return true;
+  // localhost/loopback — Smart TV browsers (Tizen, webOS) and dev tools inject local service calls.
+  if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?\//.test(blockedURI)) return true;
+  return false;
+}
+// Detect once whether BOTH the meta tag and HTTP header CSP allow https: in connect-src.
+// Browsers enforce both independently — the effective policy is the intersection.
+// Only suppress HTTPS connect-src violations when both policies allow https:.
+// The HTTP header CSP isn't directly readable from JS, so we check the meta tag and
+// also parse the vercel.json-derived header value baked into the build.
+const _cspAllowsHttps = (() => {
+  const metaEl = document.querySelector('meta[http-equiv="Content-Security-Policy"]');
+  const metaCsp = metaEl?.getAttribute('content') ?? '';
+  const metaConnectSrc = metaCsp.match(/connect-src\s+([^;]*)/)?.[1] ?? '';
+  const metaAllows = /\bhttps:\b/.test(metaConnectSrc);
+  // If no meta CSP exists, we can't confirm both policies allow https:.
+  // Be conservative: only suppress if the meta tag explicitly has it.
+  if (!metaEl) return false;
+  return metaAllows;
+})();
+// media-src counterpart of `_cspAllowsHttps`. Detect whether the meta-tag CSP
+// allows the `https:` scheme in media-src so the filter only suppresses https:
+// media-src blocks when our own policy actually permits them (the block then
+// being an environmental policy mutation, not a real regression). Browsers
+// enforce meta + header independently; our header media-src also carries
+// `https:`, so the meta check is a sufficient (conservative) proxy.
+const _cspMediaSrcAllowsHttps = (() => {
+  const metaEl = document.querySelector('meta[http-equiv="Content-Security-Policy"]');
+  if (!metaEl) return false;
+  const metaCsp = metaEl.getAttribute('content') ?? '';
+  const metaMediaSrc = metaCsp.match(/media-src\s+([^;]*)/)?.[1] ?? '';
+  return /\bhttps:\b/.test(metaMediaSrc);
+})();
+// Resolve our configured Convex deployment hostname once. Convex is multi-tenant —
+// the CSP filter must scope its first-party suppression to OUR specific hostname,
+// not all *.convex.cloud, otherwise blocks to foreign/attacker tenants get silently
+// dropped too. Returns null when the env var is missing (dev/test); the filter
+// then leaves connect-src violations to fall through to the next rule.
+const _firstPartyConvexHost = ((): string | null => {
+  const url = import.meta.env.VITE_CONVEX_URL;
+  if (typeof url !== 'string' || url.length === 0) return null;
+  try { return new URL(url).hostname; } catch { return null; }
+})();
+// @ts-expect-error — expose for tests
+window.__shouldSuppressCspViolation = shouldSuppressCspViolation;
+
+// Report CSP violations in the parent page to Sentry.
+// Sandbox iframe violations are isolated and not captured here.
+// The listener stays installed eagerly so early violations (during the
+// deferred-Sentry-init window) are still observed; `enqueueSentryCall`
+// forwards immediately if the SDK is up, otherwise buffers until drain.
+window.addEventListener('securitypolicyviolation', (e) => {
+  const blocked = e.blockedURI ?? '';
+  if (shouldSuppressCspViolation(
+    e.disposition ?? '',
+    e.effectiveDirective ?? '',
+    blocked,
+    e.sourceFile ?? '',
+    _cspAllowsHttps,
+    _firstPartyConvexHost,
+    _cspMediaSrcAllowsHttps,
+  )) return;
+  const message = `CSP: ${e.effectiveDirective} blocked ${blocked || '(inline)'}`;
+  const extra = {
+    violatedDirective: e.violatedDirective,
+    effectiveDirective: e.effectiveDirective,
+    blockedURI: blocked,
+    sourceFile: e.sourceFile,
+    lineNumber: e.lineNumber,
+    disposition: e.disposition,
+  };
+  enqueueSentryCall((s) => {
+    s.captureMessage(message, {
+      level: 'warning',
+      tags: { kind: 'csp_violation' },
+      extra,
+    });
+  });
 });
 
 import { debugGetCells, getCellCount } from '@/services/geo-convergence';
@@ -286,14 +251,19 @@ import { initMetaTags } from '@/services/meta-tags';
 import { installRuntimeFetchPatch, installWebApiRedirect } from '@/services/runtime';
 import { loadDesktopSecrets } from '@/services/runtime-config';
 import { applyStoredTheme } from '@/utils/theme-manager';
+import { applyFont } from '@/services/font-settings';
 import { SITE_VARIANT } from '@/config/variant';
 import { clearChunkReloadGuard, installChunkReloadGuard } from '@/bootstrap/chunk-reload';
+import { installStaleBundleCheck } from '@/bootstrap/stale-bundle-check';
+import { installSwUpdateHandler } from '@/bootstrap/sw-update';
 
 // Auto-reload on stale chunk 404s after deployment (Vite fires this for modulepreload failures).
 const chunkReloadStorageKey = installChunkReloadGuard(__APP_VERSION__);
 
-// Initialize Vercel Analytics
-inject();
+// Initialize Vercel Analytics (10% sampling to reduce costs)
+inject({
+  beforeSend: (event) => (Math.random() > 0.1 ? null : event),
+});
 
 // Initialize dynamic meta tags for sharing
 initMetaTags();
@@ -302,10 +272,15 @@ initMetaTags();
 installRuntimeFetchPatch();
 // In web production, route RPC calls through api.worldmonitor.app (Cloudflare edge).
 installWebApiRedirect();
+// Force-reload tabs running a stale bundle (catches the class of bug where
+// users keep a tab open across a wire-shape change). Skips when build-hash
+// is the 'dev' marker.
+installStaleBundleCheck();
 loadDesktopSecrets().catch(() => {});
 
 // Apply stored theme preference before app initialization (safety net for inline script)
 applyStoredTheme();
+applyFont();
 
 // Set data-variant on <html> so CSS theme overrides activate
 if (SITE_VARIANT && SITE_VARIANT !== 'full') {
@@ -386,40 +361,98 @@ if ('__TAURI_INTERNALS__' in window || '__TAURI__' in window) {
 }
 
 if (!('__TAURI_INTERNALS__' in window) && !('__TAURI__' in window) && 'serviceWorker' in navigator) {
-  // One-time nuke: clear stale SWs and caches from old deploys, then re-register fresh.
-  // Safe to remove after 2026-03-20 when all users have cycled through.
-  const nukeKey = 'wm-sw-nuked-v2';
-  let alreadyNuked = false;
-  try { alreadyNuked = !!localStorage.getItem(nukeKey); } catch { /* private browsing */ }
-  if (!alreadyNuked) {
-    try { localStorage.setItem(nukeKey, '1'); } catch { /* best effort */ }
-    navigator.serviceWorker.getRegistrations().then(async (regs) => {
-      await Promise.all(regs.map(r => r.unregister()));
-      const keys = await caches.keys();
-      await Promise.all(keys.map(k => caches.delete(k)));
-      console.log('[PWA] Nuked stale service workers and caches');
-      window.location.reload();
-    });
-  } else {
-    // Auto-reload when a new SW takes control (fixes stale HTML after deploys)
-    let refreshing = false;
-    navigator.serviceWorker.addEventListener('controllerchange', () => {
-      if (refreshing) return;
-      refreshing = true;
-      window.location.reload();
-    });
+  installSwUpdateHandler({ version: __APP_VERSION__ });
 
-    navigator.serviceWorker.register('/sw.js', { scope: '/' })
-      .then((registration) => {
-        console.log('[PWA] Service worker registered');
-        const swUpdateInterval = setInterval(async () => {
-          if (!navigator.onLine) return;
-          try { await registration.update(); } catch {}
-        }, 5 * 60 * 1000);
-        (window as unknown as Record<string, unknown>).__swUpdateInterval = swUpdateInterval;
-      })
-      .catch((err) => {
-        console.warn('[PWA] Service worker registration failed:', err);
+  const SW_UPDATE_SUCCESS_INTERVAL_MS = 60 * 60 * 1000;
+  const SW_UPDATE_FAILURE_INTERVAL_MS = 5 * 60 * 1000;
+  const SW_UPDATE_LAST_CHECK_KEY = 'wm-sw-last-update-check';
+  const SW_UPDATE_LAST_RESULT_KEY = 'wm-sw-last-update-ok';
+
+  const readStorageNum = (key: string): number => {
+    try {
+      const raw = localStorage.getItem(key);
+      const parsed = raw ? Number(raw) : 0;
+      return Number.isFinite(parsed) ? parsed : 0;
+    } catch {
+      return 0;
+    }
+  };
+
+  const writeStorageNum = (key: string, value: number): void => {
+    try {
+      localStorage.setItem(key, String(value));
+    } catch {}
+  };
+
+  navigator.serviceWorker.register('/sw.js', { scope: '/' })
+    .then((registration) => {
+      console.log('[PWA] Service worker registered');
+
+      let swUpdateInFlight = false;
+
+      const maybeCheckForSwUpdate = async (
+        reason: 'initial' | 'visible' | 'online' | 'interval'
+      ): Promise<void> => {
+        if (swUpdateInFlight) return;
+        if (!navigator.onLine) return;
+        if (reason === 'interval' && document.visibilityState !== 'visible') return;
+
+        const now = Date.now();
+        const lastCheck = readStorageNum(SW_UPDATE_LAST_CHECK_KEY);
+        const lastOk = readStorageNum(SW_UPDATE_LAST_RESULT_KEY);
+        const interval = lastOk >= lastCheck ? SW_UPDATE_SUCCESS_INTERVAL_MS : SW_UPDATE_FAILURE_INTERVAL_MS;
+        if (now - lastCheck < interval) return;
+
+        swUpdateInFlight = true;
+        writeStorageNum(SW_UPDATE_LAST_CHECK_KEY, now);
+        try {
+          await registration.update();
+          writeStorageNum(SW_UPDATE_LAST_RESULT_KEY, now);
+        } catch (e) {
+          console.warn('[PWA] SW update check failed:', e);
+        } finally {
+          swUpdateInFlight = false;
+        }
+      };
+
+      void maybeCheckForSwUpdate('initial');
+
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+          void maybeCheckForSwUpdate('visible');
+        }
       });
-  }
+
+      window.addEventListener('online', () => {
+        void maybeCheckForSwUpdate('online');
+      });
+
+      const swUpdateInterval = window.setInterval(() => {
+        void maybeCheckForSwUpdate('interval');
+      }, 15 * 60 * 1000);
+
+      (window as unknown as Record<string, unknown>).__swUpdateInterval = swUpdateInterval;
+    })
+    .catch((err) => {
+      console.warn('[PWA] Service worker registration failed:', err);
+    });
 }
+
+// --- SW/Cache Nuke Template ---
+// If stale service workers or caches cause issues after a major deploy, re-enable this block.
+// It runs once per user (guarded by a localStorage key), nukes all SWs and caches, then reloads.
+// IMPORTANT: This causes a visible double-load for every new/unkeyed user. Remove once rollout is complete.
+//
+// const nukeKey = 'wm-sw-nuked-v3';
+// let alreadyNuked = false;
+// try { alreadyNuked = !!localStorage.getItem(nukeKey); } catch {}
+// if (!alreadyNuked) {
+//   try { localStorage.setItem(nukeKey, '1'); } catch {}
+//   navigator.serviceWorker.getRegistrations().then(async (regs) => {
+//     await Promise.all(regs.map(r => r.unregister()));
+//     const keys = await caches.keys();
+//     await Promise.all(keys.map(k => caches.delete(k)));
+//     console.log('[PWA] Nuked stale service workers and caches');
+//     window.location.reload();
+//   });
+// }

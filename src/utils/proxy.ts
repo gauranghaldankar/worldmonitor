@@ -1,4 +1,4 @@
-import { isDesktopRuntime, toRuntimeUrl } from '../services/runtime';
+import { isDesktopRuntime, toApiUrl, toRuntimeUrl } from '../services/runtime';
 import { getPersistentCache, setPersistentCache } from '../services/persistent-cache';
 
 const isDev = import.meta.env.DEV;
@@ -12,6 +12,24 @@ const RSS_PROXY_BASE = isDev
   : RSS_DIRECT_TO_RELAY
     ? 'https://proxy.worldmonitor.app'
     : '';
+
+// Widget agent proxy:
+//   dev       → Vite proxy /widget-agent → relay
+//   desktop   → relay directly (sidecar buffers arrayBuffer() which destroys SSE streaming)
+//   prod web  → /api/widget-agent (Vercel edge) → validates Clerk JWT or tester keys
+//               then proxies SSE to relay with real server-side keys
+const WIDGET_RELAY_BASE = 'https://proxy.worldmonitor.app';
+export function widgetAgentUrl(): string {
+  if (isDev) return '/widget-agent';
+  if (isDesktopRuntime()) return `${WIDGET_RELAY_BASE}/widget-agent`;
+  return '/api/widget-agent';
+}
+
+export function widgetAgentHealthUrl(): string {
+  if (isDev) return '/widget-agent/health';
+  if (isDesktopRuntime()) return `${WIDGET_RELAY_BASE}/widget-agent/health`;
+  return '/api/widget-agent'; // Vercel handler: GET → relay /widget-agent/health
+}
 
 export function rssProxyUrl(feedUrl: string): string {
   if (isDesktopRuntime()) return proxyUrl(feedUrl);
@@ -41,7 +59,7 @@ export function proxyUrl(localPath: string): string {
     return localPath;
   }
 
-  return localPath;
+  return toApiUrl(localPath);
 }
 
 function shouldPersistResponse(url: string): boolean {

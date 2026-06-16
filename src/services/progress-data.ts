@@ -6,8 +6,9 @@
  * from bootstrap/Redis. Never calls WB API from the frontend.
  */
 
-import { createCircuitBreaker } from '@/utils';
+import { createCircuitBreaker } from '@/utils/circuit-breaker';
 import { getHydratedData } from '@/services/bootstrap';
+import { toApiUrl } from '@/services/runtime';
 
 // ---- Types ----
 
@@ -32,6 +33,21 @@ export interface ProgressDataSet {
   latestValue: number;
   oldestValue: number;
   changePercent: number; // Positive = improvement (accounts for invertTrend)
+}
+
+/**
+ * Where the rendered series came from. The UI surfaces a disclosure
+ * badge when `source === 'fallback'` so a degraded panel does not look
+ * like live truth (see issue #3758).
+ *   hydrated  -- bootstrap hydration cache (first page load)
+ *   bootstrap -- live fetch from /api/bootstrap
+ *   fallback  -- hardcoded FALLBACK_DATA (no fresh data available)
+ */
+export type ProgressDataSource = 'hydrated' | 'bootstrap' | 'fallback';
+
+export interface ProgressDataResult {
+  datasets: ProgressDataSet[];
+  source: ProgressDataSource;
 }
 
 // ---- Indicator Definitions ----
@@ -86,11 +102,18 @@ export const PROGRESS_INDICATORS: ProgressIndicator[] = [
 
 // ---- Circuit Breaker (persistent cache for instant reload) ----
 
-const breaker = createCircuitBreaker<ProgressDataSet[]>({
+const breaker = createCircuitBreaker<ProgressDataResult>({
   name: 'Progress Data',
   cacheTtlMs: 60 * 60 * 1000, // 1h — World Bank data changes yearly
   persistCache: true,
 });
+
+function fallbackResult(): ProgressDataResult {
+  return {
+    datasets: PROGRESS_INDICATORS.map(fallbackDataSet),
+    source: 'fallback',
+  };
+}
 
 // ---- Seed data shape (from seed-wb-indicators.mjs) ----
 
@@ -136,34 +159,43 @@ function resolveFromSeeds(seedMap: Map<string, SeedProgressIndicator>): Progress
   });
 }
 
-async function fetchProgressDataFresh(): Promise<ProgressDataSet[]> {
+export async function fetchProgressDataFresh(): Promise<ProgressDataResult> {
   // 1. Try bootstrap hydration cache (first page load)
   const hydrated = getHydratedData('progressData') as SeedProgressIndicator[] | undefined;
-  if (hydrated?.length) return resolveFromSeeds(buildSeedMap(hydrated));
+  if (hydrated?.length) {
+    return { datasets: resolveFromSeeds(buildSeedMap(hydrated)), source: 'hydrated' };
+  }
 
   // 2. Fallback: fetch from bootstrap endpoint directly
   try {
-    const resp = await fetch('/api/bootstrap?keys=progressData', {
+    const resp = await fetch(toApiUrl('/api/bootstrap?keys=progressData'), {
       signal: AbortSignal.timeout(5_000),
     });
     if (resp.ok) {
       const { data } = (await resp.json()) as { data: { progressData?: SeedProgressIndicator[] } };
-      if (data.progressData?.length) return resolveFromSeeds(buildSeedMap(data.progressData));
+      if (data.progressData?.length) {
+        return { datasets: resolveFromSeeds(buildSeedMap(data.progressData)), source: 'bootstrap' };
+      }
     }
   } catch { /* fall through to fallback */ }
 
-  // 3. Static fallback
-  return PROGRESS_INDICATORS.map(fallbackDataSet);
+  // 3. Static fallback — UI must show a disclosure badge (#3758)
+  return fallbackResult();
 }
 
 /**
  * Fetch progress data with persistent caching.
  * Returns instantly from IndexedDB cache on subsequent loads.
  */
-export async function fetchProgressData(): Promise<ProgressDataSet[]> {
+export async function fetchProgressData(): Promise<ProgressDataResult> {
   return breaker.execute(
     () => fetchProgressDataFresh(),
-    PROGRESS_INDICATORS.map(fallbackDataSet),
+    fallbackResult(),
+    // Never persist the static fallback — fetchProgressDataFresh swallows
+    // errors and returns a fallback result, which the breaker would otherwise
+    // cache to IndexedDB for the 1h TTL and keep showing the disclosure
+    // banner long after the network recovers.
+    { shouldCache: (result) => result.source !== 'fallback' },
   );
 }
 

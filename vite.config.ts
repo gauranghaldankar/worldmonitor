@@ -1,17 +1,125 @@
-import { defineConfig, type Plugin } from 'vite';
+import { defineConfig, loadEnv, type Plugin } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
 import { resolve, dirname, extname } from 'path';
 import { mkdir, readFile, writeFile } from 'fs/promises';
 import { brotliCompress } from 'zlib';
 import { promisify } from 'util';
 import pkg from './package.json';
-import { VARIANT_META } from './src/config/variant-meta';
+import { VARIANT_META, type VariantMeta } from './src/config/variant-meta';
 
-const isE2E = process.env.VITE_E2E === '1';
-const isDesktopBuild = process.env.VITE_DESKTOP_RUNTIME === '1';
+// Env-dependent constants moved inside defineConfig function
+
 
 const brotliCompressAsync = promisify(brotliCompress);
 const BROTLI_EXTENSIONS = new Set(['.js', '.mjs', '.css', '.html', '.svg', '.json', '.txt', '.xml', '.wasm']);
+
+// @clerk/clerk-js is loaded as a UMD bundle from the Clerk Frontend API at
+// runtime (src/services/clerk.ts), not bundled. Resolve the version from
+// package.json so the runtime SDK matches the @clerk/clerk-js types we compile
+// against, and inject it via `define` (__CLERK_JS_VERSION__). Fall back to
+// devDependencies in case the (types-only) dep is moved there, and fail the
+// build loudly if it can't be resolved — an empty version yields a `.../@/dist`
+// URL that 404s and silently breaks auth in production.
+const CLERK_DEPS = pkg.dependencies as Record<string, string>;
+const CLERK_DEV_DEPS = (pkg.devDependencies ?? {}) as Record<string, string>;
+const CLERK_JS_VERSION = (CLERK_DEPS['@clerk/clerk-js'] || CLERK_DEV_DEPS['@clerk/clerk-js'] || '')
+  .replace(/^[\^~>=<\s]*/, '');
+if (!CLERK_JS_VERSION) {
+  throw new Error('[vite] @clerk/clerk-js not found in package.json — __CLERK_JS_VERSION__ would be empty and 404 the Clerk Frontend API script URL.');
+}
+// @clerk/ui (the runtime UI controller, pinned by CLERK_UI_VERSION in
+// src/services/clerk.ts) is major 1, which pairs with @clerk/clerk-js major 6.
+// Fail the build if the SDK major drifts so the pairing is updated deliberately
+// rather than loading an incompatible UI controller and breaking auth at runtime.
+if (CLERK_JS_VERSION.split('.')[0] !== '6') {
+  throw new Error(`[vite] @clerk/clerk-js major is ${CLERK_JS_VERSION.split('.')[0]}, expected 6 — update CLERK_UI_VERSION in src/services/clerk.ts to the paired @clerk/ui major, then bump this guard.`);
+}
+
+// Single source of truth for chunk names that must NOT be hoisted into the
+// entry HTML's modulepreload list. Used by both `manualChunks` (return values
+// must literally match these strings) and `modulePreload.resolveDependencies`
+// (filter regex is built from this list). Keeping them tied prevents the
+// silent-breakage failure mode where renaming a chunk in `manualChunks`
+// re-eagerises the WebGL stack without any build-time error.
+//   - maplibre, deck-stack: heavy WebGL deps, only reachable via MapContainer
+//   - MapContainer: the dynamic-import target itself
+const LAZY_HTML_PRELOAD_CHUNKS = ['maplibre', 'deck-stack', 'MapContainer'] as const;
+const LAZY_HTML_PRELOAD_RE = new RegExp(
+  `/(${LAZY_HTML_PRELOAD_CHUNKS.join('|')})-[A-Za-z0-9_-]+\\.js$`,
+);
+
+// Panel-cluster manualChunks map. Splits the previously monolithic ~2.3MB
+// `panels` chunk into per-domain chunks so cache invalidation is local to
+// the cluster a panel lives in and per-variant builds can prune unused
+// clusters. Unmapped panels fall through to a generic `panels` chunk.
+const PANEL_CLUSTER: Record<string, string> = {
+  // Markets / equities / crypto positioning
+  AAIISentiment: 'panels-markets', CotPositioning: 'panels-markets',
+  ETFFlows: 'panels-markets', EarningsCalendar: 'panels-markets',
+  EconomicCalendar: 'panels-markets', FearGreed: 'panels-markets',
+  GoldIntelligence: 'panels-markets', LiquidityShifts: 'panels-markets',
+  MacroSignals: 'panels-markets', Market: 'panels-markets',
+  MarketBreadth: 'panels-markets', MarketImplications: 'panels-markets',
+  Positioning: 'panels-markets', Stablecoin: 'panels-markets',
+  StockAnalysis: 'panels-markets', StockBacktest: 'panels-markets',
+  WsbTickerScanner: 'panels-markets', YieldCurve: 'panels-markets',
+  // Energy / commodities / supply infra
+  ChokepointStrip: 'panels-energy', EnergyComplex: 'panels-energy',
+  EnergyCrisis: 'panels-energy', EnergyDisruptions: 'panels-energy',
+  EnergyRiskOverview: 'panels-energy', FuelPrices: 'panels-energy',
+  FuelShortage: 'panels-energy', Hormuz: 'panels-energy',
+  OilInventories: 'panels-energy', PipelineStatus: 'panels-energy',
+  StorageFacilityMap: 'panels-energy', RenewableEnergy: 'panels-energy',
+  // Defense / military / aviation
+  AirlineIntel: 'panels-defense', DefensePatents: 'panels-defense',
+  OrefSirens: 'panels-defense', StrategicPosture: 'panels-defense',
+  StrategicRisk: 'panels-defense', ThermalEscalation: 'panels-defense',
+  UcdpEvents: 'panels-defense',
+  // News / feeds / briefs
+  BreakthroughsTicker: 'panels-news', ClimateNews: 'panels-news',
+  DailyMarketBrief: 'panels-news', GdeltIntel: 'panels-news',
+  GoodThingsDigest: 'panels-news', LatestBrief: 'panels-news',
+  LiveNews: 'panels-news', News: 'panels-news',
+  PositiveNewsFeed: 'panels-news', TelegramIntel: 'panels-news',
+  // Macro / prices / trade
+  BigMac: 'panels-economy', ConsumerPrices: 'panels-economy',
+  Economic: 'panels-economy',
+  FaoFoodPriceIndex: 'panels-economy', FSI: 'panels-economy',
+  GroceryBasket: 'panels-economy', GulfEconomies: 'panels-economy',
+  Investments: 'panels-economy', MacroTiles: 'panels-economy',
+  NationalDebt: 'panels-economy', SanctionsPressure: 'panels-economy',
+  SupplyChain: 'panels-economy', TradePolicy: 'panels-economy',
+  // Country briefs / signals / monitors / agent surfaces.
+  // CorrelationPanel base lives here, so all *Correlation consumers MUST stay
+  // in this cluster — splitting them across clusters caused TDZ on init.
+  ChatAnalyst: 'panels-intel', CII: 'panels-intel',
+  Cascade: 'panels-intel', Correlation: 'panels-intel',
+  CountryBrief: 'panels-intel', CountryDeepDive: 'panels-intel',
+  CrossSourceSignals: 'panels-intel', CustomWidget: 'panels-intel',
+  Deduction: 'panels-intel',
+  DisasterCorrelation: 'panels-intel',
+  EconomicCorrelation: 'panels-intel',
+  EscalationCorrelation: 'panels-intel',
+  MilitaryCorrelation: 'panels-intel',
+  Forecast: 'panels-intel',
+  HeroSpotlight: 'panels-intel', Insights: 'panels-intel',
+  LiveWebcams: 'panels-intel', McpData: 'panels-intel',
+  Monitor: 'panels-intel', PinnedWebcams: 'panels-intel',
+  Prediction: 'panels-intel', ProgressCharts: 'panels-intel',
+  Regulation: 'panels-intel',
+  // Disasters / climate / connectivity / society
+  ClimateAnomaly: 'panels-risk', Counters: 'panels-risk',
+  DiseaseOutbreaks: 'panels-risk',
+  Displacement: 'panels-risk', GeoHubs: 'panels-risk',
+  Giving: 'panels-risk', InternetDisruptions: 'panels-risk',
+  PopulationExposure: 'panels-risk', RadiationWatch: 'panels-risk',
+  RuntimeConfig: 'panels-risk', SatelliteFires: 'panels-risk',
+  SecurityAdvisories: 'panels-risk', ServiceStatus: 'panels-risk',
+  SocialVelocity: 'panels-risk', SpeciesComeback: 'panels-risk',
+  Status: 'panels-risk', TechEvents: 'panels-risk',
+  TechHubs: 'panels-risk', TechReadiness: 'panels-risk',
+  WorldClock: 'panels-risk',
+};
 
 function brotliPrecompressPlugin(): Plugin {
   return {
@@ -38,10 +146,7 @@ function brotliPrecompressPlugin(): Plugin {
   };
 }
 
-const activeVariant = process.env.VITE_VARIANT || 'full';
-const activeMeta = VARIANT_META[activeVariant] || VARIANT_META.full;
-
-function htmlVariantPlugin(): Plugin {
+function htmlVariantPlugin(activeMeta: VariantMeta, activeVariant: string, isDesktopBuild: boolean): Plugin {
   return {
     name: 'html-variant',
     transformIndexHtml(html) {
@@ -197,6 +302,10 @@ function sebufApiPlugin(): Plugin {
       tradeServerMod, tradeHandlerMod,
       supplyChainServerMod, supplyChainHandlerMod,
       naturalServerMod, naturalHandlerMod,
+      resilienceServerMod, resilienceHandlerMod,
+      leadsServerMod, leadsHandlerMod,
+      scenarioServerMod, scenarioHandlerMod,
+      shippingV2ServerMod, shippingV2HandlerMod,
     ] = await Promise.all([
         import('./server/router'),
         import('./server/cors'),
@@ -245,6 +354,14 @@ function sebufApiPlugin(): Plugin {
         import('./server/worldmonitor/supply-chain/v1/handler'),
         import('./src/generated/server/worldmonitor/natural/v1/service_server'),
         import('./server/worldmonitor/natural/v1/handler'),
+        import('./src/generated/server/worldmonitor/resilience/v1/service_server'),
+        import('./server/worldmonitor/resilience/v1/handler'),
+        import('./src/generated/server/worldmonitor/leads/v1/service_server'),
+        import('./server/worldmonitor/leads/v1/handler'),
+        import('./src/generated/server/worldmonitor/scenario/v1/service_server'),
+        import('./server/worldmonitor/scenario/v1/handler'),
+        import('./src/generated/server/worldmonitor/shipping/v2/service_server'),
+        import('./server/worldmonitor/shipping/v2/handler'),
       ]);
 
     const serverOptions = { onError: errorMod.mapErrorToResponse };
@@ -271,6 +388,10 @@ function sebufApiPlugin(): Plugin {
       ...tradeServerMod.createTradeServiceRoutes(tradeHandlerMod.tradeHandler, serverOptions),
       ...supplyChainServerMod.createSupplyChainServiceRoutes(supplyChainHandlerMod.supplyChainHandler, serverOptions),
       ...naturalServerMod.createNaturalServiceRoutes(naturalHandlerMod.naturalHandler, serverOptions),
+      ...resilienceServerMod.createResilienceServiceRoutes(resilienceHandlerMod.resilienceHandler, serverOptions),
+      ...leadsServerMod.createLeadsServiceRoutes(leadsHandlerMod.leadsHandler, serverOptions),
+      ...scenarioServerMod.createScenarioServiceRoutes(scenarioHandlerMod.scenarioHandler, serverOptions),
+      ...shippingV2ServerMod.createShippingV2ServiceRoutes(shippingV2HandlerMod.shippingV2Handler, serverOptions),
     ];
     cachedCorsMod = corsMod;
     return routerMod.createRouter(allRoutes);
@@ -286,10 +407,33 @@ function sebufApiPlugin(): Plugin {
         }
       });
 
+      // Legacy v1 URL aliases → new sebuf RPC paths (mirror of the alias files
+      // in api/scenario/v1/ + api/supply-chain/v1/). Vercel serves the alias
+      // files directly; vite dev has no file-based routing for api/, so we
+      // rewrite the pathname here before the router lookup.
+      const V1_ALIASES: Record<string, string> = {
+        '/api/scenario/v1/run': '/api/scenario/v1/run-scenario',
+        '/api/scenario/v1/status': '/api/scenario/v1/get-scenario-status',
+        '/api/scenario/v1/templates': '/api/scenario/v1/list-scenario-templates',
+        '/api/supply-chain/v1/country-products': '/api/supply-chain/v1/get-country-products',
+        '/api/supply-chain/v1/multi-sector-cost-shock': '/api/supply-chain/v1/get-multi-sector-cost-shock',
+      };
+
       server.middlewares.use(async (req, res, next) => {
-        // Only intercept sebuf routes: /api/{domain}/v1/* (domain may contain hyphens)
-        if (!req.url || !/^\/api\/[a-z-]+\/v1\//.test(req.url)) {
+        // Intercept sebuf routes in two forms:
+        //  - standard /api/{domain}/v{N}/* (domain-first, e.g. /api/market/v1/...)
+        //  - partner-URL-preservation /api/v{N}/{domain}/* (version-first, e.g.
+        //    /api/v2/shipping/...). Only the second form applies when the
+        //    external contract already uses a reversed layout.
+        if (!req.url || !/^\/api\/(?:[a-z][a-z0-9-]*\/v\d+|v\d+\/[a-z][a-z0-9-]*)\//.test(req.url)) {
           return next();
+        }
+
+        // Rewrite documented v1 URL → new sebuf path if this is an alias.
+        const [pathOnly, queryOnly] = req.url.split('?', 2);
+        const aliasTarget = pathOnly ? V1_ALIASES[pathOnly] : undefined;
+        if (aliasTarget) {
+          req.url = queryOnly ? `${aliasTarget}?${queryOnly}` : aliasTarget;
         }
 
         try {
@@ -410,7 +554,8 @@ const RSS_PROXY_ALLOWED_DOMAINS = new Set([
   'www.ft.com', 'openai.com', 'www.reutersagency.com', 'feeds.reuters.com',
   'asia.nikkei.com', 'www.cfr.org', 'www.csis.org', 'www.politico.com',
   'www.brookings.edu', 'layoffs.fyi', 'www.defensenews.com', 'www.militarytimes.com',
-  'taskandpurpose.com', 'news.usni.org', 'www.oryxspioenkop.com', 'www.gov.uk',
+  'taskandpurpose.com', 'news.usni.org', 'www.oryxspioenkop.com',
+  'www.smartraveller.gov.au', 'www.gov.uk',
   'www.foreignaffairs.com', 'www.atlanticcouncil.org',
   // Tech variant
   'www.zdnet.com', 'www.techmeme.com', 'www.darkreading.com', 'www.schneier.com',
@@ -443,12 +588,24 @@ const RSS_PROXY_ALLOWED_DOMAINS = new Set([
   'www.hurriyet.com.tr', 'tvn24.pl', 'www.polsatnews.pl', 'www.rp.pl', 'meduza.io',
   'novayagazeta.eu', 'www.bangkokpost.com', 'vnexpress.net', 'www.abc.net.au',
   'news.ycombinator.com',
+  // Hindi / India feeds
+  'www.aajtak.in', 'www.amarujala.com',
+  // Hungarian / Central European feeds
+  'telex.hu', 'index.hu', 'hvg.hu', '444.hu', '24.hu', 'hirado.hu', 'portfolio.hu', 'www.portfolio.hu', 'www.atv.hu',
+  // Investigative journalism sources
+  'www.occrp.org', 'dfrlab.org', 'www.lighthousereports.com', 'thesentry.org', 'globalinitiative.net', 'vsquare.org', 'correctiv.org',
+  // Croatian feeds
+  'n1info.hr', 'www.index.hr', 'www.jutarnji.hr', 'balkaninsight.com',
   // Finance variant
   'www.coindesk.com', 'cointelegraph.com',
   // Happy variant — positive news sources
   'www.goodnewsnetwork.org', 'www.positive.news', 'reasonstobecheerful.world',
   'www.optimistdaily.com', 'www.sunnyskyz.com', 'www.huffpost.com',
   'www.sciencedaily.com', 'feeds.nature.com', 'www.livescience.com', 'www.newscientist.com',
+  // Feed-registry coverage (PR fix/feed-validation-unblock — kept sync with shared/rss-allowed-domains.json)
+  'abcnews.go.com', 'abcnews.com', 'www.corriere.it', 'www.rt.com', 'www.alarabiya.net', 'tuoitrenews.vn',
+  'www.yonhapnewstv.co.kr', 'www.chosun.com', 'rss.libsyn.com', 'feeds.megaphone.fm', 'rss.art19.com',
+  'idp.nature.com',
 ]);
 
 function rssProxyPlugin(): Plugin {
@@ -600,601 +757,682 @@ function gpsjamDevPlugin(): Plugin {
   };
 }
 
-export default defineConfig({
-  define: {
-    __APP_VERSION__: JSON.stringify(pkg.version),
-  },
-  plugins: [
-    htmlVariantPlugin(),
-    polymarketPlugin(),
-    rssProxyPlugin(),
-    youtubeLivePlugin(),
-    gpsjamDevPlugin(),
-    sebufApiPlugin(),
-    brotliPrecompressPlugin(),
-    VitePWA({
-      registerType: 'autoUpdate',
-      injectRegister: false,
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), '');
+  // Inject environment variables from .env files into process.env.
+  // This ensures that API keys and other secrets in .env.local are
+  // available to the dev server plugins and server-side handlers.
+  Object.assign(process.env, env);
 
-      includeAssets: [
-        'favico/favicon.ico',
-        'favico/apple-touch-icon.png',
-        'favico/favicon-32x32.png',
-      ],
+  const isE2E = process.env.VITE_E2E === '1';
+  const isDesktopBuild = process.env.VITE_DESKTOP_RUNTIME === '1';
+  const activeVariant = process.env.VITE_VARIANT || 'full';
+  const activeMeta = VARIANT_META[activeVariant] || VARIANT_META.full;
 
-      manifest: {
-        name: `${activeMeta.siteName} - ${activeMeta.subject}`,
-        short_name: activeMeta.shortName,
-        description: activeMeta.description,
-        start_url: '/',
-        scope: '/',
-        display: 'standalone',
-        orientation: 'any',
-        theme_color: '#0a0f0a',
-        background_color: '#0a0f0a',
-        categories: activeMeta.categories,
-        icons: [
-          { src: '/favico/android-chrome-192x192.png', sizes: '192x192', type: 'image/png' },
-          { src: '/favico/android-chrome-512x512.png', sizes: '512x512', type: 'image/png' },
-          { src: '/favico/android-chrome-512x512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+  return {
+    define: {
+      __APP_VERSION__: JSON.stringify(pkg.version),
+      // Resolved + build-time validated above (devDependencies fallback +
+      // non-empty + major-pairing guards).
+      __CLERK_JS_VERSION__: JSON.stringify(CLERK_JS_VERSION),
+      // Vercel sets VERCEL_GIT_COMMIT_SHA on production + preview builds.
+      // Local `vite build` falls back to 'dev' — installStaleBundleCheck
+      // detects the marker and skips the comparison so dev tabs don't
+      // reload on every focus.
+      __BUILD_HASH__: JSON.stringify(process.env.VERCEL_GIT_COMMIT_SHA ?? 'dev'),
+    },
+    plugins: [
+      // Emit dist/build-hash.txt with the deployed SHA so the running bundle
+      // can fetch /build-hash.txt at tab-focus time and force-reload itself
+      // if it's running an older bundle (see src/bootstrap/stale-bundle-check.ts).
+      // Same-origin static asset, NOT under /api/* — installWebApiRedirect
+      // doesn't touch it, so the comparison reflects the web deployment.
+      {
+        name: 'wm-emit-build-hash',
+        apply: 'build',
+        generateBundle() {
+          this.emitFile({
+            type: 'asset',
+            fileName: 'build-hash.txt',
+            source: process.env.VERCEL_GIT_COMMIT_SHA ?? 'dev',
+          });
+        },
+      },
+      htmlVariantPlugin(activeMeta, activeVariant, isDesktopBuild),
+      polymarketPlugin(),
+      rssProxyPlugin(),
+      youtubeLivePlugin(),
+      gpsjamDevPlugin(),
+      sebufApiPlugin(),
+      brotliPrecompressPlugin(),
+      VitePWA({
+        registerType: 'autoUpdate',
+        injectRegister: false,
+
+        includeAssets: [
+          'favico/favicon.ico',
+          'favico/apple-touch-icon.png',
+          'favico/favicon-32x32.png',
+        ],
+
+        manifest: {
+          name: `${activeMeta.siteName} - ${activeMeta.subject}`,
+          short_name: activeMeta.shortName,
+          description: activeMeta.description,
+          start_url: '/',
+          scope: '/',
+          display: 'standalone',
+          orientation: 'any',
+          theme_color: '#0a0f0a',
+          background_color: '#0a0f0a',
+          categories: activeMeta.categories,
+          icons: [
+            { src: '/favico/android-chrome-192x192.png', sizes: '192x192', type: 'image/png' },
+            { src: '/favico/android-chrome-512x512.png', sizes: '512x512', type: 'image/png' },
+            { src: '/favico/android-chrome-512x512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+          ],
+        },
+
+        workbox: {
+          globPatterns: ['**/*.{js,css,ico,png,svg,woff2}'],
+          globIgnores: ['**/ml*.js', '**/onnx*.wasm', '**/locale-*.js', '**/clerk-*.js'],
+          // globe.gl + three.js grows main bundle past the 2 MiB default limit
+          maximumFileSizeToCacheInBytes: 4 * 1024 * 1024,
+          navigateFallback: null,
+          skipWaiting: true,
+          clientsClaim: true,
+          cleanupOutdatedCaches: true,
+          // Web Push handler (Phase 6). importScripts runs in the SW
+          // context; /push-handler.js is a static file copied from
+          // public/ and attaches 'push' + 'notificationclick' listeners.
+          importScripts: ['/push-handler.js'],
+
+          runtimeCaching: [
+            {
+              urlPattern: ({ request }: { request: Request }) => request.mode === 'navigate',
+              handler: 'NetworkFirst',
+              options: {
+                cacheName: 'html-navigation',
+                networkTimeoutSeconds: 5,
+                cacheableResponse: { statuses: [200] },
+              },
+            },
+            {
+              urlPattern: ({ url, sameOrigin }: { url: URL; sameOrigin: boolean }) =>
+                sameOrigin && /^\/api\//.test(url.pathname),
+              handler: 'NetworkOnly',
+              method: 'GET',
+            },
+            {
+              urlPattern: ({ url, sameOrigin }: { url: URL; sameOrigin: boolean }) =>
+                sameOrigin && /^\/api\//.test(url.pathname),
+              handler: 'NetworkOnly',
+              method: 'POST',
+            },
+            {
+              urlPattern: ({ url, sameOrigin }: { url: URL; sameOrigin: boolean }) =>
+                sameOrigin && /^\/rss\//.test(url.pathname),
+              handler: 'NetworkOnly',
+              method: 'GET',
+            },
+            {
+              urlPattern: ({ url }: { url: URL }) =>
+                url.pathname.endsWith('.pmtiles') ||
+                url.hostname.endsWith('.r2.dev') ||
+                url.hostname === 'build.protomaps.com',
+              handler: 'NetworkFirst',
+              options: {
+                cacheName: 'pmtiles-ranges',
+                expiration: { maxEntries: 500, maxAgeSeconds: 30 * 24 * 60 * 60 },
+                cacheableResponse: { statuses: [0, 200] },
+              },
+            },
+            {
+              urlPattern: /^https:\/\/protomaps\.github\.io\//,
+              handler: 'CacheFirst',
+              options: {
+                cacheName: 'protomaps-assets',
+                expiration: { maxEntries: 100, maxAgeSeconds: 365 * 24 * 60 * 60 },
+                cacheableResponse: { statuses: [0, 200] },
+              },
+            },
+            {
+              urlPattern: /^https:\/\/fonts\.googleapis\.com\//,
+              handler: 'StaleWhileRevalidate',
+              options: {
+                cacheName: 'google-fonts-css',
+                expiration: { maxEntries: 10, maxAgeSeconds: 365 * 24 * 60 * 60 },
+              },
+            },
+            {
+              urlPattern: /^https:\/\/fonts\.gstatic\.com\//,
+              handler: 'CacheFirst',
+              options: {
+                cacheName: 'google-fonts-woff',
+                expiration: { maxEntries: 30, maxAgeSeconds: 365 * 24 * 60 * 60 },
+                cacheableResponse: { statuses: [0, 200] },
+              },
+            },
+            {
+              urlPattern: /\/assets\/locale-.*\.js$/i,
+              handler: 'CacheFirst',
+              options: {
+                cacheName: 'locale-files',
+                expiration: { maxEntries: 20, maxAgeSeconds: 30 * 24 * 60 * 60 },
+                cacheableResponse: { statuses: [0, 200] },
+              },
+            },
+            {
+              urlPattern: /\.(?:png|jpg|jpeg|svg|gif|webp)$/i,
+              handler: 'StaleWhileRevalidate',
+              options: {
+                cacheName: 'images',
+                expiration: { maxEntries: 100, maxAgeSeconds: 7 * 24 * 60 * 60 },
+              },
+            },
+          ],
+        },
+
+        devOptions: {
+          enabled: false,
+        },
+      }),
+    ],
+    resolve: {
+      alias: {
+        '@': resolve(__dirname, 'src'),
+        child_process: resolve(__dirname, 'src/shims/child-process.ts'),
+        'node:child_process': resolve(__dirname, 'src/shims/child-process.ts'),
+        '@loaders.gl/worker-utils/dist/lib/process-utils/child-process-proxy.js': resolve(
+          __dirname,
+          'src/shims/child-process-proxy.ts'
+        ),
+      },
+    },
+    worker: {
+      format: 'es',
+    },
+    build: {
+      // Geospatial bundles (maplibre/deck) are expected to be large even when split.
+      // Raise warning threshold to reduce noisy false alarms in CI.
+      chunkSizeWarningLimit: 1200,
+      // Vite 6 hoists every dynamic chunk's STATIC deps into the entry HTML's
+      // modulepreload list to avoid latency on the first dynamic import. For the
+      // map stack that defeats the whole point of dynamic-importing MapContainer:
+      // ~3MB of WebGL deps would still download at parse time. Strip them here so
+      // they only load when MapContainer's `await import(...)` actually fires
+      // (still preloaded in parallel via __vitePreload at that moment).
+      modulePreload: {
+        resolveDependencies: (_filename, deps, { hostType }) => {
+          if (hostType !== 'html') return deps;
+          return deps.filter(d => !LAZY_HTML_PRELOAD_RE.test(d));
+        },
+      },
+      rollupOptions: {
+        onwarn(warning, warn) {
+          // onnxruntime-web ships a minified browser bundle that intentionally uses eval.
+          // Keep build logs focused by filtering this known third-party warning only.
+          if (
+            warning.code === 'EVAL'
+            && typeof warning.id === 'string'
+            && warning.id.includes('/onnxruntime-web/dist/ort-web.min.js')
+          ) {
+            return;
+          }
+
+          warn(warning);
+        },
+        input: {
+          main: resolve(__dirname, 'index.html'),
+          embed: resolve(__dirname, 'embed.html'),
+          settings: resolve(__dirname, 'settings.html'),
+          liveChannels: resolve(__dirname, 'live-channels.html'),
+          mcpGrant: resolve(__dirname, 'mcp-grant.html'),
+        },
+        output: {
+          manualChunks(id) {
+            if (id.includes('node_modules')) {
+              if (id.includes('/@xenova/transformers/')) {
+                return 'transformers';
+              }
+              if (id.includes('/onnxruntime-web/')) {
+                return 'onnxruntime';
+              }
+              // NOTE: chunk names below MUST match entries in LAZY_HTML_PRELOAD_CHUNKS
+              // (top of file). The resolveDependencies filter relies on this string
+              // identity; renaming here without updating the constant silently
+              // re-eagerises the WebGL stack into the entry HTML's modulepreload list.
+              if (id.includes('/maplibre-gl/') || id.includes('/pmtiles/') || id.includes('/@protomaps/basemaps/')) {
+                return 'maplibre';
+              }
+              if (
+                id.includes('/@deck.gl/')
+                || id.includes('/@luma.gl/')
+                || id.includes('/@loaders.gl/')
+                || id.includes('/@math.gl/')
+                || id.includes('/h3-js/')
+              ) {
+                return 'deck-stack';
+              }
+              if (id.includes('/d3/')) {
+                return 'd3';
+              }
+              if (id.includes('/topojson-client/')) {
+                return 'topojson';
+              }
+              if (id.includes('/i18next')) {
+                return 'i18n';
+              }
+              if (id.includes('/@sentry/')) {
+                return 'sentry';
+              }
+              if (id.includes('/@clerk/clerk-js/')) {
+                // Clerk remains a runtime dynamic import; the stable chunk name
+                // lets Workbox keep the large auth SDK out of precache.
+                return 'clerk';
+              }
+            }
+            if (id.includes('/src/components/') && id.endsWith('Panel.ts')) {
+              // Cluster split (PANEL_CLUSTER) is staged but disabled: it exposes
+              // a systemic TDZ in panels with top-level `new XxxServiceClient(...)`
+              // singletons (~20+ panels). They each need lazy-init refactors
+              // before the cluster split can ship. See ce-doc-review followup.
+              return 'panels';
+            }
+            // Give lazy-loaded locale chunks a recognizable prefix so the
+            // service worker can exclude them from precache (en.json is
+            // statically imported into the main bundle).
+            const localeMatch = id.match(/\/locales\/(\w+)\.json$/);
+            if (localeMatch && localeMatch[1] !== 'en') {
+              return `locale-${localeMatch[1]}`;
+            }
+            return undefined;
+          },
+        },
+      },
+    },
+    server: {
+      port: 3000,
+      open: !isE2E,
+      hmr: isE2E ? false : undefined,
+      watch: {
+        ignored: [
+          '**/test-results/**',
+          '**/playwright-report/**',
+          '**/.playwright-mcp/**',
         ],
       },
-
-      workbox: {
-        globPatterns: ['**/*.{js,css,ico,png,svg,woff2}'],
-        globIgnores: ['**/ml*.js', '**/onnx*.wasm', '**/locale-*.js'],
-        // globe.gl + three.js grows main bundle past the 2 MiB default limit
-        maximumFileSizeToCacheInBytes: 4 * 1024 * 1024,
-        navigateFallback: null,
-        skipWaiting: true,
-        clientsClaim: true,
-        cleanupOutdatedCaches: true,
-
-        runtimeCaching: [
-          {
-            urlPattern: ({ request }: { request: Request }) => request.mode === 'navigate',
-            handler: 'NetworkOnly',
+      proxy: {
+        // Widget agent — forward to Railway relay for SSE streaming
+        '/widget-agent': {
+          target: 'https://proxy.worldmonitor.app',
+          changeOrigin: true,
+        },
+        // Yahoo Finance API
+        '/api/yahoo': {
+          target: 'https://query1.finance.yahoo.com',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/api\/yahoo/, ''),
+        },
+        // Polymarket handled by polymarketPlugin() — no prod proxy needed
+        // USGS Earthquake API
+        '/api/earthquake': {
+          target: 'https://earthquake.usgs.gov',
+          changeOrigin: true,
+          timeout: 30000,
+          rewrite: (path) => path.replace(/^\/api\/earthquake/, ''),
+          configure: (proxy) => {
+            proxy.on('error', (err) => {
+              console.log('Earthquake proxy error:', err.message);
+            });
           },
-          {
-            urlPattern: ({ url, sameOrigin }: { url: URL; sameOrigin: boolean }) =>
-              sameOrigin && /^\/api\//.test(url.pathname),
-            handler: 'NetworkOnly',
-            method: 'GET',
+        },
+        // PizzINT - Pentagon Pizza Index
+        '/api/pizzint': {
+          target: 'https://www.pizzint.watch',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/api\/pizzint/, '/api'),
+          configure: (proxy) => {
+            proxy.on('error', (err) => {
+              console.log('PizzINT proxy error:', err.message);
+            });
           },
-          {
-            urlPattern: ({ url, sameOrigin }: { url: URL; sameOrigin: boolean }) =>
-              sameOrigin && /^\/api\//.test(url.pathname),
-            handler: 'NetworkOnly',
-            method: 'POST',
+        },
+        // FRED Economic Data - handled by Vercel serverless function in prod
+        // In dev, we proxy to the API directly with the key from .env
+        '/api/fred-data': {
+          target: 'https://api.stlouisfed.org',
+          changeOrigin: true,
+          rewrite: (path) => {
+            const url = new URL(path, 'http://localhost');
+            const seriesId = url.searchParams.get('series_id');
+            const start = url.searchParams.get('observation_start');
+            const end = url.searchParams.get('observation_end');
+            const apiKey = process.env.FRED_API_KEY || '';
+            return `/fred/series/observations?series_id=${seriesId}&api_key=${apiKey}&file_type=json&sort_order=desc&limit=10${start ? `&observation_start=${start}` : ''}${end ? `&observation_end=${end}` : ''}`;
           },
-          {
-            urlPattern: ({ url, sameOrigin }: { url: URL; sameOrigin: boolean }) =>
-              sameOrigin && /^\/rss\//.test(url.pathname),
-            handler: 'NetworkOnly',
-            method: 'GET',
+        },
+        // RSS Feeds - BBC
+        '/rss/bbc': {
+          target: 'https://feeds.bbci.co.uk',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/bbc/, ''),
+        },
+        // RSS Feeds - Guardian
+        '/rss/guardian': {
+          target: 'https://www.theguardian.com',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/guardian/, ''),
+        },
+        // RSS Feeds - NPR
+        '/rss/npr': {
+          target: 'https://feeds.npr.org',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/npr/, ''),
+        },
+        // RSS Feeds - Al Jazeera
+        '/rss/aljazeera': {
+          target: 'https://www.aljazeera.com',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/aljazeera/, ''),
+        },
+        // RSS Feeds - CNN
+        '/rss/cnn': {
+          target: 'http://rss.cnn.com',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/cnn/, ''),
+        },
+        // RSS Feeds - Hacker News
+        '/rss/hn': {
+          target: 'https://hnrss.org',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/hn/, ''),
+        },
+        // RSS Feeds - Ars Technica
+        '/rss/arstechnica': {
+          target: 'https://feeds.arstechnica.com',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/arstechnica/, ''),
+        },
+        // RSS Feeds - The Verge
+        '/rss/verge': {
+          target: 'https://www.theverge.com',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/verge/, ''),
+        },
+        // RSS Feeds - CNBC
+        '/rss/cnbc': {
+          target: 'https://www.cnbc.com',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/cnbc/, ''),
+        },
+        // RSS Feeds - MarketWatch
+        '/rss/marketwatch': {
+          target: 'https://feeds.marketwatch.com',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/marketwatch/, ''),
+        },
+        // RSS Feeds - Defense/Intel sources
+        '/rss/defenseone': {
+          target: 'https://www.defenseone.com',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/defenseone/, ''),
+        },
+        '/rss/warontherocks': {
+          target: 'https://warontherocks.com',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/warontherocks/, ''),
+        },
+        '/rss/breakingdefense': {
+          target: 'https://breakingdefense.com',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/breakingdefense/, ''),
+        },
+        '/rss/bellingcat': {
+          target: 'https://www.bellingcat.com',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/bellingcat/, ''),
+        },
+        // RSS Feeds - TechCrunch (layoffs)
+        '/rss/techcrunch': {
+          target: 'https://techcrunch.com',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/techcrunch/, ''),
+        },
+        // Google News RSS
+        '/rss/googlenews': {
+          target: 'https://news.google.com',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/googlenews/, ''),
+        },
+        // AI Company Blogs
+        '/rss/openai': {
+          target: 'https://openai.com',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/openai/, ''),
+        },
+        '/rss/anthropic': {
+          target: 'https://www.anthropic.com',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/anthropic/, ''),
+        },
+        '/rss/googleai': {
+          target: 'https://blog.google',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/googleai/, ''),
+        },
+        '/rss/deepmind': {
+          target: 'https://deepmind.google',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/deepmind/, ''),
+        },
+        '/rss/huggingface': {
+          target: 'https://huggingface.co',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/huggingface/, ''),
+        },
+        '/rss/techreview': {
+          target: 'https://www.technologyreview.com',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/techreview/, ''),
+        },
+        '/rss/arxiv': {
+          target: 'https://rss.arxiv.org',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/arxiv/, ''),
+        },
+        // Government
+        '/rss/whitehouse': {
+          target: 'https://www.whitehouse.gov',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/whitehouse/, ''),
+        },
+        '/rss/statedept': {
+          target: 'https://www.state.gov',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/statedept/, ''),
+        },
+        '/rss/state': {
+          target: 'https://www.state.gov',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/state/, ''),
+        },
+        '/rss/defense': {
+          target: 'https://www.defense.gov',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/defense/, ''),
+        },
+        '/rss/justice': {
+          target: 'https://www.justice.gov',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/justice/, ''),
+        },
+        '/rss/cdc': {
+          target: 'https://tools.cdc.gov',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/cdc/, ''),
+        },
+        '/rss/fema': {
+          target: 'https://www.fema.gov',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/fema/, ''),
+        },
+        '/rss/dhs': {
+          target: 'https://www.dhs.gov',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/dhs/, ''),
+        },
+        '/rss/fedreserve': {
+          target: 'https://www.federalreserve.gov',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/fedreserve/, ''),
+        },
+        '/rss/sec': {
+          target: 'https://www.sec.gov',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/sec/, ''),
+        },
+        '/rss/treasury': {
+          target: 'https://home.treasury.gov',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/treasury/, ''),
+        },
+        '/rss/cisa': {
+          target: 'https://www.cisa.gov',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/cisa/, ''),
+        },
+        // Think Tanks
+        '/rss/brookings': {
+          target: 'https://www.brookings.edu',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/brookings/, ''),
+        },
+        '/rss/cfr': {
+          target: 'https://www.cfr.org',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/cfr/, ''),
+        },
+        '/rss/csis': {
+          target: 'https://www.csis.org',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/csis/, ''),
+        },
+        // Defense
+        '/rss/warzone': {
+          target: 'https://www.thedrive.com',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/warzone/, ''),
+        },
+        '/rss/defensegov': {
+          target: 'https://www.defense.gov',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/defensegov/, ''),
+        },
+        // Security
+        '/rss/krebs': {
+          target: 'https://krebsonsecurity.com',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/krebs/, ''),
+        },
+        // Finance
+        '/rss/yahoonews': {
+          target: 'https://finance.yahoo.com',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/yahoonews/, ''),
+        },
+        // Diplomat
+        '/rss/diplomat': {
+          target: 'https://thediplomat.com',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/diplomat/, ''),
+        },
+        // VentureBeat
+        '/rss/venturebeat': {
+          target: 'https://venturebeat.com',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/venturebeat/, ''),
+        },
+        // Foreign Policy
+        '/rss/foreignpolicy': {
+          target: 'https://foreignpolicy.com',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/foreignpolicy/, ''),
+        },
+        // Financial Times
+        '/rss/ft': {
+          target: 'https://www.ft.com',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/ft/, ''),
+        },
+        // Reuters
+        '/rss/reuters': {
+          target: 'https://www.reutersagency.com',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/rss\/reuters/, ''),
+        },
+        // Cloudflare Radar - Internet outages
+        '/api/cloudflare-radar': {
+          target: 'https://api.cloudflare.com',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/api\/cloudflare-radar/, ''),
+        },
+        // NGA Maritime Safety Information - Navigation Warnings
+        '/api/nga-msi': {
+          target: 'https://msi.nga.mil',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/api\/nga-msi/, ''),
+        },
+        // GDELT GEO 2.0 API - Global event data
+        '/api/gdelt': {
+          target: 'https://api.gdeltproject.org',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/api\/gdelt/, ''),
+        },
+        // AISStream WebSocket proxy for live vessel tracking
+        '/ws/aisstream': {
+          target: 'wss://stream.aisstream.io',
+          changeOrigin: true,
+          ws: true,
+          rewrite: (path) => path.replace(/^\/ws\/aisstream/, ''),
+        },
+        // FAA NASSTATUS - Airport delays and closures
+        '/api/faa': {
+          target: 'https://nasstatus.faa.gov',
+          changeOrigin: true,
+          secure: true,
+          rewrite: (path) => path.replace(/^\/api\/faa/, ''),
+          configure: (proxy) => {
+            proxy.on('error', (err) => {
+              console.log('FAA NASSTATUS proxy error:', err.message);
+            });
           },
-          {
-            urlPattern: ({ url }: { url: URL }) =>
-              url.pathname.endsWith('.pmtiles') ||
-              url.hostname.endsWith('.r2.dev') ||
-              url.hostname === 'build.protomaps.com',
-            handler: 'NetworkFirst',
-            options: {
-              cacheName: 'pmtiles-ranges',
-              expiration: { maxEntries: 500, maxAgeSeconds: 30 * 24 * 60 * 60 },
-              cacheableResponse: { statuses: [0, 200] },
-            },
+        },
+        // OpenSky Network - Aircraft tracking (military flight detection)
+        '/api/opensky': {
+          target: 'https://opensky-network.org/api',
+          changeOrigin: true,
+          secure: true,
+          rewrite: (path) => path.replace(/^\/api\/opensky/, ''),
+          configure: (proxy) => {
+            proxy.on('error', (err) => {
+              console.log('OpenSky proxy error:', err.message);
+            });
           },
-          {
-            urlPattern: /^https:\/\/protomaps\.github\.io\//,
-            handler: 'CacheFirst',
-            options: {
-              cacheName: 'protomaps-assets',
-              expiration: { maxEntries: 100, maxAgeSeconds: 365 * 24 * 60 * 60 },
-              cacheableResponse: { statuses: [0, 200] },
-            },
+        },
+        // ADS-B Exchange - Military aircraft tracking (backup/supplement)
+        '/api/adsb-exchange': {
+          target: 'https://adsbexchange.com/api',
+          changeOrigin: true,
+          secure: true,
+          rewrite: (path) => path.replace(/^\/api\/adsb-exchange/, ''),
+          configure: (proxy) => {
+            proxy.on('error', (err) => {
+              console.log('ADS-B Exchange proxy error:', err.message);
+            });
           },
-          {
-            urlPattern: /^https:\/\/fonts\.googleapis\.com\//,
-            handler: 'StaleWhileRevalidate',
-            options: {
-              cacheName: 'google-fonts-css',
-              expiration: { maxEntries: 10, maxAgeSeconds: 365 * 24 * 60 * 60 },
-            },
-          },
-          {
-            urlPattern: /^https:\/\/fonts\.gstatic\.com\//,
-            handler: 'CacheFirst',
-            options: {
-              cacheName: 'google-fonts-woff',
-              expiration: { maxEntries: 30, maxAgeSeconds: 365 * 24 * 60 * 60 },
-              cacheableResponse: { statuses: [0, 200] },
-            },
-          },
-          {
-            urlPattern: /\/assets\/locale-.*\.js$/i,
-            handler: 'CacheFirst',
-            options: {
-              cacheName: 'locale-files',
-              expiration: { maxEntries: 20, maxAgeSeconds: 30 * 24 * 60 * 60 },
-              cacheableResponse: { statuses: [0, 200] },
-            },
-          },
-          {
-            urlPattern: /\.(?:png|jpg|jpeg|svg|gif|webp)$/i,
-            handler: 'StaleWhileRevalidate',
-            options: {
-              cacheName: 'images',
-              expiration: { maxEntries: 100, maxAgeSeconds: 7 * 24 * 60 * 60 },
-            },
-          },
-        ],
-      },
-
-      devOptions: {
-        enabled: false,
-      },
-    }),
-  ],
-  resolve: {
-    alias: {
-      '@': resolve(__dirname, 'src'),
-      child_process: resolve(__dirname, 'src/shims/child-process.ts'),
-      'node:child_process': resolve(__dirname, 'src/shims/child-process.ts'),
-      '@loaders.gl/worker-utils/dist/lib/process-utils/child-process-proxy.js': resolve(
-        __dirname,
-        'src/shims/child-process-proxy.ts'
-      ),
-    },
-  },
-  build: {
-    // Geospatial bundles (maplibre/deck) are expected to be large even when split.
-    // Raise warning threshold to reduce noisy false alarms in CI.
-    chunkSizeWarningLimit: 1200,
-    rollupOptions: {
-      onwarn(warning, warn) {
-        // onnxruntime-web ships a minified browser bundle that intentionally uses eval.
-        // Keep build logs focused by filtering this known third-party warning only.
-        if (
-          warning.code === 'EVAL'
-          && typeof warning.id === 'string'
-          && warning.id.includes('/onnxruntime-web/dist/ort-web.min.js')
-        ) {
-          return;
-        }
-
-        warn(warning);
-      },
-      input: {
-        main: resolve(__dirname, 'index.html'),
-        settings: resolve(__dirname, 'settings.html'),
-        liveChannels: resolve(__dirname, 'live-channels.html'),
-      },
-      output: {
-        manualChunks(id) {
-          if (id.includes('node_modules')) {
-            if (id.includes('/@xenova/transformers/')) {
-              return 'transformers';
-            }
-            if (id.includes('/onnxruntime-web/')) {
-              return 'onnxruntime';
-            }
-            if (id.includes('/maplibre-gl/') || id.includes('/pmtiles/') || id.includes('/@protomaps/basemaps/')) {
-              return 'maplibre';
-            }
-            if (
-              id.includes('/@deck.gl/')
-              || id.includes('/@luma.gl/')
-              || id.includes('/@loaders.gl/')
-              || id.includes('/@math.gl/')
-              || id.includes('/h3-js/')
-            ) {
-              return 'deck-stack';
-            }
-            if (id.includes('/d3/')) {
-              return 'd3';
-            }
-            if (id.includes('/topojson-client/')) {
-              return 'topojson';
-            }
-            if (id.includes('/i18next')) {
-              return 'i18n';
-            }
-            if (id.includes('/@sentry/')) {
-              return 'sentry';
-            }
-          }
-          if (id.includes('/src/components/') && id.endsWith('Panel.ts')) {
-            return 'panels';
-          }
-          // Give lazy-loaded locale chunks a recognizable prefix so the
-          // service worker can exclude them from precache (en.json is
-          // statically imported into the main bundle).
-          const localeMatch = id.match(/\/locales\/(\w+)\.json$/);
-          if (localeMatch && localeMatch[1] !== 'en') {
-            return `locale-${localeMatch[1]}`;
-          }
-          return undefined;
         },
       },
     },
-  },
-  server: {
-    port: 3000,
-    open: !isE2E,
-    hmr: isE2E ? false : undefined,
-    watch: {
-      ignored: [
-        '**/test-results/**',
-        '**/playwright-report/**',
-        '**/.playwright-mcp/**',
-      ],
-    },
-    proxy: {
-      // Yahoo Finance API
-      '/api/yahoo': {
-        target: 'https://query1.finance.yahoo.com',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api\/yahoo/, ''),
-      },
-      // Polymarket handled by polymarketPlugin() — no prod proxy needed
-      // USGS Earthquake API
-      '/api/earthquake': {
-        target: 'https://earthquake.usgs.gov',
-        changeOrigin: true,
-        timeout: 30000,
-        rewrite: (path) => path.replace(/^\/api\/earthquake/, ''),
-        configure: (proxy) => {
-          proxy.on('error', (err) => {
-            console.log('Earthquake proxy error:', err.message);
-          });
-        },
-      },
-      // PizzINT - Pentagon Pizza Index
-      '/api/pizzint': {
-        target: 'https://www.pizzint.watch',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api\/pizzint/, '/api'),
-        configure: (proxy) => {
-          proxy.on('error', (err) => {
-            console.log('PizzINT proxy error:', err.message);
-          });
-        },
-      },
-      // FRED Economic Data - handled by Vercel serverless function in prod
-      // In dev, we proxy to the API directly with the key from .env
-      '/api/fred-data': {
-        target: 'https://api.stlouisfed.org',
-        changeOrigin: true,
-        rewrite: (path) => {
-          const url = new URL(path, 'http://localhost');
-          const seriesId = url.searchParams.get('series_id');
-          const start = url.searchParams.get('observation_start');
-          const end = url.searchParams.get('observation_end');
-          const apiKey = process.env.FRED_API_KEY || '';
-          return `/fred/series/observations?series_id=${seriesId}&api_key=${apiKey}&file_type=json&sort_order=desc&limit=10${start ? `&observation_start=${start}` : ''}${end ? `&observation_end=${end}` : ''}`;
-        },
-      },
-      // RSS Feeds - BBC
-      '/rss/bbc': {
-        target: 'https://feeds.bbci.co.uk',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/bbc/, ''),
-      },
-      // RSS Feeds - Guardian
-      '/rss/guardian': {
-        target: 'https://www.theguardian.com',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/guardian/, ''),
-      },
-      // RSS Feeds - NPR
-      '/rss/npr': {
-        target: 'https://feeds.npr.org',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/npr/, ''),
-      },
-      // RSS Feeds - Al Jazeera
-      '/rss/aljazeera': {
-        target: 'https://www.aljazeera.com',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/aljazeera/, ''),
-      },
-      // RSS Feeds - CNN
-      '/rss/cnn': {
-        target: 'http://rss.cnn.com',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/cnn/, ''),
-      },
-      // RSS Feeds - Hacker News
-      '/rss/hn': {
-        target: 'https://hnrss.org',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/hn/, ''),
-      },
-      // RSS Feeds - Ars Technica
-      '/rss/arstechnica': {
-        target: 'https://feeds.arstechnica.com',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/arstechnica/, ''),
-      },
-      // RSS Feeds - The Verge
-      '/rss/verge': {
-        target: 'https://www.theverge.com',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/verge/, ''),
-      },
-      // RSS Feeds - CNBC
-      '/rss/cnbc': {
-        target: 'https://www.cnbc.com',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/cnbc/, ''),
-      },
-      // RSS Feeds - MarketWatch
-      '/rss/marketwatch': {
-        target: 'https://feeds.marketwatch.com',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/marketwatch/, ''),
-      },
-      // RSS Feeds - Defense/Intel sources
-      '/rss/defenseone': {
-        target: 'https://www.defenseone.com',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/defenseone/, ''),
-      },
-      '/rss/warontherocks': {
-        target: 'https://warontherocks.com',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/warontherocks/, ''),
-      },
-      '/rss/breakingdefense': {
-        target: 'https://breakingdefense.com',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/breakingdefense/, ''),
-      },
-      '/rss/bellingcat': {
-        target: 'https://www.bellingcat.com',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/bellingcat/, ''),
-      },
-      // RSS Feeds - TechCrunch (layoffs)
-      '/rss/techcrunch': {
-        target: 'https://techcrunch.com',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/techcrunch/, ''),
-      },
-      // Google News RSS
-      '/rss/googlenews': {
-        target: 'https://news.google.com',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/googlenews/, ''),
-      },
-      // AI Company Blogs
-      '/rss/openai': {
-        target: 'https://openai.com',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/openai/, ''),
-      },
-      '/rss/anthropic': {
-        target: 'https://www.anthropic.com',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/anthropic/, ''),
-      },
-      '/rss/googleai': {
-        target: 'https://blog.google',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/googleai/, ''),
-      },
-      '/rss/deepmind': {
-        target: 'https://deepmind.google',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/deepmind/, ''),
-      },
-      '/rss/huggingface': {
-        target: 'https://huggingface.co',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/huggingface/, ''),
-      },
-      '/rss/techreview': {
-        target: 'https://www.technologyreview.com',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/techreview/, ''),
-      },
-      '/rss/arxiv': {
-        target: 'https://rss.arxiv.org',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/arxiv/, ''),
-      },
-      // Government
-      '/rss/whitehouse': {
-        target: 'https://www.whitehouse.gov',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/whitehouse/, ''),
-      },
-      '/rss/statedept': {
-        target: 'https://www.state.gov',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/statedept/, ''),
-      },
-      '/rss/state': {
-        target: 'https://www.state.gov',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/state/, ''),
-      },
-      '/rss/defense': {
-        target: 'https://www.defense.gov',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/defense/, ''),
-      },
-      '/rss/justice': {
-        target: 'https://www.justice.gov',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/justice/, ''),
-      },
-      '/rss/cdc': {
-        target: 'https://tools.cdc.gov',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/cdc/, ''),
-      },
-      '/rss/fema': {
-        target: 'https://www.fema.gov',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/fema/, ''),
-      },
-      '/rss/dhs': {
-        target: 'https://www.dhs.gov',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/dhs/, ''),
-      },
-      '/rss/fedreserve': {
-        target: 'https://www.federalreserve.gov',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/fedreserve/, ''),
-      },
-      '/rss/sec': {
-        target: 'https://www.sec.gov',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/sec/, ''),
-      },
-      '/rss/treasury': {
-        target: 'https://home.treasury.gov',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/treasury/, ''),
-      },
-      '/rss/cisa': {
-        target: 'https://www.cisa.gov',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/cisa/, ''),
-      },
-      // Think Tanks
-      '/rss/brookings': {
-        target: 'https://www.brookings.edu',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/brookings/, ''),
-      },
-      '/rss/cfr': {
-        target: 'https://www.cfr.org',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/cfr/, ''),
-      },
-      '/rss/csis': {
-        target: 'https://www.csis.org',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/csis/, ''),
-      },
-      // Defense
-      '/rss/warzone': {
-        target: 'https://www.thedrive.com',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/warzone/, ''),
-      },
-      '/rss/defensegov': {
-        target: 'https://www.defense.gov',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/defensegov/, ''),
-      },
-      // Security
-      '/rss/krebs': {
-        target: 'https://krebsonsecurity.com',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/krebs/, ''),
-      },
-      // Finance
-      '/rss/yahoonews': {
-        target: 'https://finance.yahoo.com',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/yahoonews/, ''),
-      },
-      // Diplomat
-      '/rss/diplomat': {
-        target: 'https://thediplomat.com',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/diplomat/, ''),
-      },
-      // VentureBeat
-      '/rss/venturebeat': {
-        target: 'https://venturebeat.com',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/venturebeat/, ''),
-      },
-      // Foreign Policy
-      '/rss/foreignpolicy': {
-        target: 'https://foreignpolicy.com',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/foreignpolicy/, ''),
-      },
-      // Financial Times
-      '/rss/ft': {
-        target: 'https://www.ft.com',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/ft/, ''),
-      },
-      // Reuters
-      '/rss/reuters': {
-        target: 'https://www.reutersagency.com',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/rss\/reuters/, ''),
-      },
-      // Cloudflare Radar - Internet outages
-      '/api/cloudflare-radar': {
-        target: 'https://api.cloudflare.com',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api\/cloudflare-radar/, ''),
-      },
-      // NGA Maritime Safety Information - Navigation Warnings
-      '/api/nga-msi': {
-        target: 'https://msi.nga.mil',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api\/nga-msi/, ''),
-      },
-      // GDELT GEO 2.0 API - Global event data
-      '/api/gdelt': {
-        target: 'https://api.gdeltproject.org',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api\/gdelt/, ''),
-      },
-      // AISStream WebSocket proxy for live vessel tracking
-      '/ws/aisstream': {
-        target: 'wss://stream.aisstream.io',
-        changeOrigin: true,
-        ws: true,
-        rewrite: (path) => path.replace(/^\/ws\/aisstream/, ''),
-      },
-      // FAA NASSTATUS - Airport delays and closures
-      '/api/faa': {
-        target: 'https://nasstatus.faa.gov',
-        changeOrigin: true,
-        secure: true,
-        rewrite: (path) => path.replace(/^\/api\/faa/, ''),
-        configure: (proxy) => {
-          proxy.on('error', (err) => {
-            console.log('FAA NASSTATUS proxy error:', err.message);
-          });
-        },
-      },
-      // OpenSky Network - Aircraft tracking (military flight detection)
-      '/api/opensky': {
-        target: 'https://opensky-network.org/api',
-        changeOrigin: true,
-        secure: true,
-        rewrite: (path) => path.replace(/^\/api\/opensky/, ''),
-        configure: (proxy) => {
-          proxy.on('error', (err) => {
-            console.log('OpenSky proxy error:', err.message);
-          });
-        },
-      },
-      // ADS-B Exchange - Military aircraft tracking (backup/supplement)
-      '/api/adsb-exchange': {
-        target: 'https://adsbexchange.com/api',
-        changeOrigin: true,
-        secure: true,
-        rewrite: (path) => path.replace(/^\/api\/adsb-exchange/, ''),
-        configure: (proxy) => {
-          proxy.on('error', (err) => {
-            console.log('ADS-B Exchange proxy error:', err.message);
-          });
-        },
-      },
-    },
-  },
+  };
 });

@@ -19,7 +19,12 @@ export function formatTime(date: Date): string {
   }
 }
 
-export function formatPrice(price: number): string {
+export function formatPrice(price: number | null | undefined): string {
+  // Live feeds occasionally omit `price` (undefined) rather than sending null,
+  // and `null`/NaN slip through call-site `!` assertions on `number | null`
+  // fields. Guard here so a missing price renders the unavailable placeholder
+  // instead of throwing `undefined.toLocaleString()` (WORLDMONITOR-SH).
+  if (typeof price !== 'number' || !Number.isFinite(price)) return '--';
   if (price >= 1000) {
     return `$${price.toLocaleString(undefined, {
       minimumFractionDigits: 0,
@@ -121,25 +126,7 @@ export function loadFromStorage<T>(key: string, defaultValue: T): T {
   return defaultValue;
 }
 
-let _storageQuotaExceeded = false;
-
-export function isStorageQuotaExceeded(): boolean {
-  return _storageQuotaExceeded;
-}
-
-export function isQuotaError(e: unknown): boolean {
-  return e instanceof DOMException && (e.name === 'QuotaExceededError' || e.code === 22);
-}
-
-export function markStorageQuotaExceeded(): void {
-  if (!_storageQuotaExceeded) {
-    _storageQuotaExceeded = true;
-    console.warn('[Storage] Quota exceeded — disabling further writes');
-  }
-}
-
 export function saveToStorage<T>(key: string, value: T): void {
-  if (_storageQuotaExceeded) return;
   try {
     localStorage.setItem(key, JSON.stringify(value));
   } catch (e) {
@@ -172,9 +159,29 @@ export function chunkArray<T>(items: T[], size: number): T[][] {
   return chunks;
 }
 
+export function toUniqueSorted(items: string[]): string[] {
+  return Array.from(new Set(items)).sort();
+}
+
+export function toUniqueSortedLowercase(items: string[]): string[] {
+  return toUniqueSorted(items.map((item) => item.toLowerCase()));
+}
+
+export function shuffle<T>(arr: T[]): T[] {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const tmp = a[i] as T;
+    a[i] = a[j] as T;
+    a[j] = tmp;
+  }
+  return a;
+}
+
 export { proxyUrl, fetchWithProxy, rssProxyUrl } from './proxy';
 export { exportToJSON, exportToCSV, ExportPanel } from './export';
 export { buildMapUrl, parseMapUrlState } from './urlState';
+export { withTimeout, TimeoutError } from './with-timeout';
 export type { ParsedMapUrlState } from './urlState';
 export { CircuitBreaker, createCircuitBreaker, getCircuitBreakerStatus, getCircuitBreakerCooldownInfo } from './circuit-breaker';
 export type { CircuitBreakerOptions } from './circuit-breaker';
@@ -182,5 +189,9 @@ export * from './analysis-constants';
 export { getCSSColor, invalidateColorCache } from './theme-colors';
 export { getStoredTheme, getCurrentTheme, setTheme, applyStoredTheme, getThemePreference, setThemePreference } from './theme-manager';
 export type { Theme, ThemePreference } from './theme-manager';
+export { toFlagEmoji } from './country-flag';
+export { showToast } from './toast';
 
 import { getCurrentLanguage } from '../services/i18n';
+import { isQuotaError, markStorageQuotaExceeded } from './storage-quota';
+export { isStorageQuotaExceeded, isQuotaError, markStorageQuotaExceeded } from './storage-quota';

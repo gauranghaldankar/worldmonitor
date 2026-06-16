@@ -20,11 +20,14 @@ function compareAnalysisDesc<T extends { analysisAt: number; generatedAt: string
 }
 
 function analysisHistoryIndexKey(symbol: string, includeNews: boolean): string {
-  return `market:stock-analysis-history:index:v2:${sanitizeSymbol(symbol)}:${includeNews ? 'news' : 'core'}`;
+  // v3: bumped to rotate pre-PR snapshots missing new dividend fields.
+  // Live analyze-stock cache is also v3 (see analyze-stock.ts).
+  return `market:stock-analysis-history:index:v3:${sanitizeSymbol(symbol)}:${includeNews ? 'news' : 'core'}`;
 }
 
 function analysisItemKey(analysisId: string): string {
-  return `market:stock-analysis-history:item:v2:${analysisId}`;
+  // v3: see analysisHistoryIndexKey note.
+  return `market:stock-analysis-history:item:v3:${analysisId}`;
 }
 
 function backtestSnapshotKey(symbol: string, evalWindowDays: number): string {
@@ -37,6 +40,10 @@ function backtestLedgerIndexKey(symbol: string): string {
 
 function backtestLedgerItemKey(analysisId: string): string {
   return `market:stock-analysis-ledger:item:v1:${analysisId}`;
+}
+
+function normalizeSymbolList(symbols: string[]): string[] {
+  return [...new Set(symbols.map(sanitizeSymbol).filter(Boolean))];
 }
 
 function normalizeAnalysisRecord(
@@ -134,7 +141,7 @@ export async function getStoredStockAnalysisHistory(
   includeNews: boolean,
   limitPerSymbol = ANALYSIS_HISTORY_LIMIT,
 ): Promise<AnalysisHistoryRecord> {
-  const normalized = [...new Set(symbols.map(sanitizeSymbol).filter(Boolean))];
+  const normalized = normalizeSymbolList(symbols);
   const clampedLimit = Math.max(1, Math.min(ANALYSIS_HISTORY_LIMIT, limitPerSymbol));
   const out: AnalysisHistoryRecord = {};
 
@@ -202,7 +209,7 @@ export async function getStoredStockBacktestSnapshots(
   symbols: string[],
   evalWindowDays: number,
 ): Promise<BacktestStockResponse[]> {
-  const normalized = [...new Set(symbols.map(sanitizeSymbol).filter(Boolean))];
+  const normalized = normalizeSymbolList(symbols);
   const keys = normalized.map((symbol) => backtestSnapshotKey(symbol, evalWindowDays));
   const cached = await getCachedJsonBatch(keys);
 

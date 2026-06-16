@@ -2,7 +2,10 @@ import {StrictMode} from 'react';
 import {createRoot} from 'react-dom/client';
 import App, { renderTurnstileWidgets } from './App.tsx';
 import { initI18n } from './i18n';
+import { initSentry } from './sentry';
 import './index.css';
+
+initSentry();
 
 const TURNSTILE_SCRIPT_SELECTOR = 'script[src^="https://challenges.cloudflare.com/turnstile/v0/api.js"]';
 
@@ -14,6 +17,8 @@ initI18n().then(() => {
   );
 
   // Render widgets once React has mounted and the async Turnstile script is ready.
+  // Used by the enterprise contact form (/pro/#enterprise) — the only remaining
+  // form on this page after the waitlist cutover.
   const initWidgets = () => {
     if (!window.turnstile) return false;
     return renderTurnstileWidgets() > 0;
@@ -31,8 +36,6 @@ initI18n().then(() => {
     }, 500);
   }
 
-  // Re-render Turnstile widgets when navigating between pages (hash routing).
-  // Retry a few times since React needs to mount the new page's .cf-turnstile divs.
   window.addEventListener('hashchange', () => {
     let tries = 0;
     const poll = () => {

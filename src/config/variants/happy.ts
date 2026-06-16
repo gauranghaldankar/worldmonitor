@@ -22,7 +22,7 @@ export const DEFAULT_PANELS: Record<string, PanelConfig> = {
 export const DEFAULT_MAP_LAYERS: MapLayers = {
   gpsJamming: false,
   satellites: false,
-  notamOverlay: false,
+
 
   conflicts: false,
   bases: false,
@@ -71,18 +71,21 @@ export const DEFAULT_MAP_LAYERS: MapLayers = {
   tradeRoutes: false,
   iranAttacks: false,
   ciiChoropleth: false,
+  resilienceScore: false,
   dayNight: false,
   // Commodity variant layers (disabled in happy variant)
   miningSites: false,
   processingPlants: false,
   commodityPorts: false,
+  webcams: false,
+  diseaseOutbreaks: false,
 };
 
 // Mobile defaults — same as desktop for happy variant
 export const MOBILE_DEFAULT_MAP_LAYERS: MapLayers = {
   gpsJamming: false,
   satellites: false,
-  notamOverlay: false,
+
 
   conflicts: false,
   bases: false,
@@ -131,11 +134,14 @@ export const MOBILE_DEFAULT_MAP_LAYERS: MapLayers = {
   tradeRoutes: false,
   iranAttacks: false,
   ciiChoropleth: false,
+  resilienceScore: false,
   dayNight: false,
   // Commodity variant layers (disabled in happy variant)
   miningSites: false,
   processingPlants: false,
   commodityPorts: false,
+  webcams: false,
+  diseaseOutbreaks: false,
 };
 
 export const VARIANT_CONFIG: VariantConfig = {

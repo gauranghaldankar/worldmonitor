@@ -1,4 +1,5 @@
 import type { NaturalEvent, NaturalEventCategory } from '@/types';
+import { getRpcBaseUrl } from '@/services/rpc-client';
 import { NATURAL_EVENT_CATEGORIES } from '@/types';
 import {
   NaturalServiceClient,
@@ -34,7 +35,7 @@ function normalizeNaturalCategory(category: string | undefined): NaturalEventCat
     : 'manmade';
 }
 
-const client = new NaturalServiceClient('', { fetch: (...args) => globalThis.fetch(...args) });
+const client = new NaturalServiceClient(getRpcBaseUrl(), { fetch: (...args) => globalThis.fetch(...args) });
 const breaker = createCircuitBreaker<ListNaturalEventsResponse>({ name: 'NaturalEvents', cacheTtlMs: 30 * 60 * 1000, persistCache: true });
 
 const emptyFallback: ListNaturalEventsResponse = { events: [] };
@@ -75,7 +76,7 @@ export async function fetchNaturalEvents(_days = 30): Promise<NaturalEvent[]> {
   const hydrated = getHydratedData('naturalEvents') as ListNaturalEventsResponse | undefined;
   const response = (hydrated?.events?.length ? hydrated : null) ?? await breaker.execute(async () => {
     return client.listNaturalEvents({ days: 30 });
-  }, emptyFallback);
+  }, emptyFallback, { shouldCache: (r) => r.events.length > 0 });
 
   return (response.events || []).map(toNaturalEvent);
 }

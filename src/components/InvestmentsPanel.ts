@@ -7,7 +7,8 @@ import type {
   GulfInvestingEntity,
   GulfInvestmentStatus,
 } from '@/types';
-import { escapeHtml } from '@/utils/sanitize';
+import { toUniqueSorted } from '@/utils';
+import { escapeHtml, unsafeRawHtml } from '@/utils/sanitize';
 import { t } from '@/services/i18n';
 
 interface InvestmentFilters {
@@ -110,8 +111,8 @@ export class InvestmentsPanel extends Panel {
   private render(): void {
     const filtered = this.getFiltered();
 
-    const entities = Array.from(new Set(GULF_INVESTMENTS.map(i => i.investingEntity))).sort();
-    const sectors = Array.from(new Set(GULF_INVESTMENTS.map(i => i.sector))).sort();
+    const entities = toUniqueSorted(GULF_INVESTMENTS.map((i) => i.investingEntity));
+    const sectors = toUniqueSorted(GULF_INVESTMENTS.map((i) => i.sector));
 
     const sortCls = (key: keyof GulfInvestment) =>
       this.sortKey === key ? 'fdi-sort fdi-sort-active' : 'fdi-sort';
@@ -189,7 +190,7 @@ export class InvestmentsPanel extends Panel {
         ${rows || `<div class="fdi-empty">${t('components.investments.noMatch')}</div>`}
       </div>`;
 
-    this.setContent(html);
+    this.setSafeContent(unsafeRawHtml(html, 'legacy Panel.setContent() migration'));
     if (this.countEl) this.countEl.textContent = String(filtered.length);
   }
 

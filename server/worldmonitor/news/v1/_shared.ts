@@ -26,19 +26,50 @@ export { hashString };
 // Headline deduplication (used by SummarizeArticle)
 // ========================================================================
 
-// @ts-ignore -- plain JS module, no .d.mts needed for this pure function
+// @ts-expect-error -- plain JS module, no .d.mts needed for this pure function
 export { deduplicateHeadlines } from './dedup.mjs';
 
 // ========================================================================
 // SummarizeArticle: Full prompt builder (ported from _summarize-handler.js)
 // ========================================================================
 
+const MAX_BODY_INTERPOLATION_LEN = 400;
+
 export function buildArticlePrompts(
   headlines: string[],
   uniqueHeadlines: string[],
-  opts: { mode: string; geoContext: string; variant: string; lang: string },
+  opts: {
+    mode: string;
+    geoContext: string;
+    variant: string;
+    lang: string;
+    // Optional article bodies paired 1:1 with uniqueHeadlines. When a body is
+    // non-empty, the prompt interleaves it as `    Context: <body>` under its
+    // headline so the LLM grounds on the article instead of hallucinating
+    // from the headline metadata. Bodies must be pre-sanitised by the caller
+    // (summarize-article.ts runs them through sanitizeForPrompt). Skipped
+    // entirely in translate mode — that path is headline[0]-only.
+    bodies?: string[];
+  },
 ): { systemPrompt: string; userPrompt: string } {
-  const headlineText = uniqueHeadlines.map((h, i) => `${i + 1}. ${h}`).join('\n');
+  // When bodies are provided and this mode interpolates them, render each
+  // numbered headline with its Context line beneath. Otherwise render the
+  // original headline-only format (byte-identical prompt to pre-fix — R6).
+  const interpolateBodies = opts.mode !== 'translate'
+    && Array.isArray(opts.bodies)
+    && opts.bodies.some((b) => typeof b === 'string' && b.length > 0);
+  const headlineText = interpolateBodies
+    ? uniqueHeadlines.map((h, i) => {
+        // typeof check was redundant: ?? '' handles undefined; string-only
+        // input contract is enforced by the caller (summarize-article.ts
+        // sanitises bodies into string values before passing here).
+        const rawBody = opts.bodies?.[i] ?? '';
+        const clipped = rawBody.slice(0, MAX_BODY_INTERPOLATION_LEN);
+        return clipped.length > 0
+          ? `${i + 1}. ${h}\n    Context: ${clipped}`
+          : `${i + 1}. ${h}`;
+      }).join('\n')
+    : uniqueHeadlines.map((h, i) => `${i + 1}. ${h}`).join('\n');
   const intelSection = opts.geoContext ? `\n\n${opts.geoContext}` : '';
   const isTechVariant = opts.variant === 'tech';
   const dateContext = `Current date: ${new Date().toISOString().split('T')[0]}.${isTechVariant ? '' : ' Provide geopolitical context appropriate for the current date.'}`;
@@ -123,62 +154,8 @@ Rules:
 }
 
 // ========================================================================
-// SummarizeArticle: Provider credential resolution
+// SummarizeArticle: Provider credential resolution (canonical source)
 // ========================================================================
 
-export interface ProviderCredentials {
-  apiUrl: string;
-  model: string;
-  headers: Record<string, string>;
-  extraBody?: Record<string, unknown>;
-}
-
-export function getProviderCredentials(provider: string): ProviderCredentials | null {
-  if (provider === 'ollama') {
-    const baseUrl = process.env.OLLAMA_API_URL;
-    if (!baseUrl) return null;
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    const apiKey = process.env.OLLAMA_API_KEY;
-    if (apiKey) {
-      headers['Authorization'] = `Bearer ${apiKey}`;
-    }
-    const rawMax = parseInt(process.env.OLLAMA_MAX_TOKENS || '300', 10);
-    const ollamaMaxTokens = Number.isFinite(rawMax) ? Math.min(Math.max(rawMax, 50), 2000) : 300;
-    return {
-      apiUrl: new URL('/v1/chat/completions', baseUrl).toString(),
-      model: process.env.OLLAMA_MODEL || 'llama3.1:8b',
-      headers,
-      extraBody: { think: false, max_tokens: ollamaMaxTokens },
-    };
-  }
-
-  if (provider === 'groq') {
-    const apiKey = process.env.GROQ_API_KEY;
-    if (!apiKey) return null;
-    return {
-      apiUrl: 'https://api.groq.com/openai/v1/chat/completions',
-      model: 'llama-3.1-8b-instant',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-    };
-  }
-
-  if (provider === 'openrouter') {
-    const apiKey = process.env.OPENROUTER_API_KEY;
-    if (!apiKey) return null;
-    return {
-      apiUrl: 'https://openrouter.ai/api/v1/chat/completions',
-      model: 'google/gemini-2.5-flash',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://worldmonitor.app',
-        'X-Title': 'WorldMonitor',
-      },
-    };
-  }
-
-  return null;
-}
+export { getProviderCredentials } from '../../../_shared/llm';
+export type { ProviderCredentials } from '../../../_shared/llm';

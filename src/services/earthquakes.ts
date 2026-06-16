@@ -1,3 +1,4 @@
+import { getRpcBaseUrl } from '@/services/rpc-client';
 import {
   SeismologyServiceClient,
   type Earthquake,
@@ -9,7 +10,7 @@ import { getHydratedData } from '@/services/bootstrap';
 // Re-export the proto Earthquake type as the domain's public type
 export type { Earthquake };
 
-const client = new SeismologyServiceClient('', { fetch: (...args) => globalThis.fetch(...args) });
+const client = new SeismologyServiceClient(getRpcBaseUrl(), { fetch: (...args) => globalThis.fetch(...args) });
 const breaker = createCircuitBreaker<ListEarthquakesResponse>({ name: 'Seismology', cacheTtlMs: 30 * 60 * 1000, persistCache: true });
 
 const emptyFallback: ListEarthquakesResponse = { earthquakes: [] };
@@ -20,6 +21,6 @@ export async function fetchEarthquakes(): Promise<Earthquake[]> {
 
   const response = await breaker.execute(async () => {
     return client.listEarthquakes({ minMagnitude: 0, start: 0, end: 0, pageSize: 0, cursor: '' });
-  }, emptyFallback);
+  }, emptyFallback, { shouldCache: (r) => r.earthquakes.length > 0 });
   return response.earthquakes;
 }

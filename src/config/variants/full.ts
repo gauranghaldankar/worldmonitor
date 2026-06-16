@@ -37,6 +37,9 @@ export const DEFAULT_PANELS: Record<string, PanelConfig> = {
   polymarket: { name: 'Predictions', enabled: true, priority: 1 },
   commodities: { name: 'Commodities', enabled: true, priority: 1 },
   markets: { name: 'Markets', enabled: true, priority: 1 },
+  'stock-analysis': { name: 'Stock Analysis', enabled: true, priority: 1 },
+  'stock-backtest': { name: 'Backtesting', enabled: true, priority: 1 },
+  'daily-market-brief': { name: 'Daily Market Brief', enabled: true, priority: 1 },
   economic: { name: 'Economic Indicators', enabled: true, priority: 1 },
   finance: { name: 'Financial', enabled: true, priority: 1 },
   tech: { name: 'Technology', enabled: true, priority: 2 },
@@ -54,7 +57,7 @@ export const DEFAULT_PANELS: Record<string, PanelConfig> = {
 export const DEFAULT_MAP_LAYERS: MapLayers = {
   gpsJamming: false,
   satellites: false,
-  notamOverlay: false,
+
 
   conflicts: true,
   bases: true,
@@ -102,18 +105,21 @@ export const DEFAULT_MAP_LAYERS: MapLayers = {
   tradeRoutes: false,
   iranAttacks: true,
   ciiChoropleth: false,
+  resilienceScore: false,
   dayNight: false,
   // Commodity variant layers (disabled in full variant)
   miningSites: false,
   processingPlants: false,
   commodityPorts: false,
+  webcams: false,
+  diseaseOutbreaks: false,
 };
 
 // Mobile-specific defaults for geopolitical
 export const MOBILE_DEFAULT_MAP_LAYERS: MapLayers = {
   gpsJamming: false,
   satellites: false,
-  notamOverlay: false,
+
 
   conflicts: true,
   bases: false,
@@ -161,11 +167,14 @@ export const MOBILE_DEFAULT_MAP_LAYERS: MapLayers = {
   tradeRoutes: false,
   iranAttacks: true,
   ciiChoropleth: false,
+  resilienceScore: false,
   dayNight: false,
   // Commodity variant layers (disabled in full variant)
   miningSites: false,
   processingPlants: false,
   commodityPorts: false,
+  webcams: false,
+  diseaseOutbreaks: false,
 };
 
 export const VARIANT_CONFIG: VariantConfig = {

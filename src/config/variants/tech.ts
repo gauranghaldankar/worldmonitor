@@ -72,8 +72,8 @@ export const FEEDS: Record<string, Feed[]> = {
   // Accelerator & VC Blogs - Thought leadership
   vcblogs: [
     { name: 'Y Combinator Blog', url: rss('https://www.ycombinator.com/blog/rss/') },
-    { name: 'a16z Blog', url: rss('https://a16z.com/feed/') },
-    { name: 'First Round Review', url: rss('https://review.firstround.com/feed.xml') },
+    { name: 'a16z Blog', url: rss('https://www.a16z.news/feed') },
+    { name: 'First Round Review', url: rss('https://review.firstround.com/articles/rss') },
     { name: 'Sequoia Blog', url: rss('https://www.sequoiacap.com/feed/') },
     { name: 'NFX Essays', url: rss('https://www.nfx.com/feed') },
     { name: 'Paul Graham Essays', url: rss('https://www.aaronsw.com/2002/feeds/pgessays.rss') },
@@ -197,7 +197,6 @@ export const DEFAULT_PANELS: Record<string, PanelConfig> = {
   accelerators: { name: 'Accelerators & Demo Days', enabled: true, priority: 1 },
   security: { name: 'Cybersecurity', enabled: true, priority: 1 },
   policy: { name: 'AI Policy & Regulation', enabled: true, priority: 1 },
-  regulation: { name: 'AI Regulation Dashboard', enabled: true, priority: 1 },
   layoffs: { name: 'Layoffs Tracker', enabled: true, priority: 1 },
   markets: { name: 'Tech Stocks', enabled: true, priority: 2 },
   finance: { name: 'Financial News', enabled: true, priority: 2 },
@@ -216,7 +215,7 @@ export const DEFAULT_MAP_LAYERS: MapLayers = {
   // Keep only relevant layers, set others to false
   gpsJamming: false,
   satellites: false,
-  notamOverlay: false,
+
 
   conflicts: false,
   bases: false,
@@ -264,18 +263,21 @@ export const DEFAULT_MAP_LAYERS: MapLayers = {
   tradeRoutes: false,
   iranAttacks: false,
   ciiChoropleth: false,
+  resilienceScore: false,
   dayNight: false,
   // Commodity variant layers (disabled in tech variant)
   miningSites: false,
   processingPlants: false,
   commodityPorts: false,
+  webcams: false,
+  diseaseOutbreaks: false,
 };
 
 // Mobile defaults for tech variant
 export const MOBILE_DEFAULT_MAP_LAYERS: MapLayers = {
   gpsJamming: false,
   satellites: false,
-  notamOverlay: false,
+
 
   conflicts: false,
   bases: false,
@@ -323,11 +325,14 @@ export const MOBILE_DEFAULT_MAP_LAYERS: MapLayers = {
   tradeRoutes: false,
   iranAttacks: false,
   ciiChoropleth: false,
+  resilienceScore: false,
   dayNight: false,
   // Commodity variant layers (disabled in tech variant)
   miningSites: false,
   processingPlants: false,
   commodityPorts: false,
+  webcams: false,
+  diseaseOutbreaks: false,
 };
 
 export const VARIANT_CONFIG: VariantConfig = {

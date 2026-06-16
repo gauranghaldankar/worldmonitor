@@ -1,5 +1,7 @@
 import type { PizzIntStatus, PizzIntLocation, PizzIntDefconLevel, GdeltTensionPair } from '@/types';
+import { getRpcBaseUrl } from '@/services/rpc-client';
 import { createCircuitBreaker } from '@/utils';
+import { getHydratedData } from '@/services/bootstrap';
 import { t } from '@/services/i18n';
 import {
   IntelligenceServiceClient,
@@ -11,7 +13,7 @@ import {
 
 // ---- Sebuf client ----
 
-const client = new IntelligenceServiceClient('', { fetch: (...args) => globalThis.fetch(...args) });
+const client = new IntelligenceServiceClient(getRpcBaseUrl(), { fetch: (...args) => globalThis.fetch(...args) });
 
 // ---- Circuit breakers ----
 
@@ -27,7 +29,7 @@ const gdeltBreaker = createCircuitBreaker<GdeltTensionPair[]>({
   name: 'GDELT Tensions',
   maxFailures: 3,
   cooldownMs: 5 * 60 * 1000,
-  cacheTtlMs: 10 * 60 * 1000,
+  cacheTtlMs: 15 * 60 * 1000,
   persistCache: true,
 });
 
@@ -60,7 +62,7 @@ function toLocation(proto: ProtoLocation): PizzIntLocation {
     current_popularity: proto.currentPopularity,
     percentage_of_usual: proto.percentageOfUsual || null,
     is_spike: proto.isSpike,
-    spike_magnitude: proto.spikeMagnitude || null,
+    spike_magnitude: typeof proto.spikeMagnitude === 'number' ? proto.spikeMagnitude : null,
     data_source: proto.dataSource,
     recorded_at: proto.recordedAt,
     data_freshness: FRESHNESS_REVERSE[proto.dataFreshness] || 'stale',
@@ -114,6 +116,9 @@ const defaultStatus: PizzIntStatus = {
 // ---- Public API ----
 
 export async function fetchPizzIntStatus(): Promise<PizzIntStatus> {
+  const hydrated = getHydratedData('pizzint') as GetPizzintStatusResponse | undefined;
+  if (hydrated?.pizzint) return toStatus(hydrated.pizzint);
+
   return pizzintBreaker.execute(async () => {
     const resp: GetPizzintStatusResponse = await client.getPizzintStatus({ includeGdelt: false });
     if (!resp.pizzint) throw new Error('No PizzINT data');

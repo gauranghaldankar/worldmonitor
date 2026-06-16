@@ -1,4 +1,5 @@
 import type { TheaterPostureSummary } from './military-surge';
+import { getRpcBaseUrl } from '@/services/rpc-client';
 import {
   MilitaryServiceClient,
   type GetTheaterPostureResponse,
@@ -9,7 +10,7 @@ import { getHydratedData } from '@/services/bootstrap';
 
 // ---- Sebuf client ----
 
-const client = new MilitaryServiceClient('', { fetch: (...args) => globalThis.fetch(...args) });
+const client = new MilitaryServiceClient(getRpcBaseUrl(), { fetch: (...args) => globalThis.fetch(...args) });
 
 // ---- Legacy interface (preserved for consumer compatibility) ----
 
@@ -198,7 +199,7 @@ export async function fetchCachedTheaterPosture(signal?: AbortSignal): Promise<C
       const data = toPostureData(resp);
       saveToStorage(data);
       return data;
-    }, emptyFallback()),
+    }, emptyFallback(), { shouldCache: (r) => r.postures.length > 0 }),
     signal,
   );
 

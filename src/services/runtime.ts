@@ -1,6 +1,16 @@
 import { SITE_VARIANT } from '@/config/variant';
+import { getClerkToken } from '@/services/clerk';
 
-const WS_API_URL = import.meta.env.VITE_WS_API_URL || '';
+const ENV = (() => {
+  try {
+    return import.meta.env ?? {};
+  } catch {
+    return {} as Record<string, string | undefined>;
+  }
+})();
+
+const WS_API_URL = ENV.VITE_WS_API_URL || '';
+const DEFAULT_WEB_API_URL = 'https://api.worldmonitor.app';
 const KEYED_CLOUD_API_PATTERN = /^\/api\/(?:[^/]+\/v1\/|bootstrap(?:\?|$)|polymarket(?:\?|$)|ais-snapshot(?:\?|$))/;
 
 const DEFAULT_REMOTE_HOSTS: Record<string, string> = {
@@ -12,7 +22,7 @@ const DEFAULT_REMOTE_HOSTS: Record<string, string> = {
 };
 
 const DEFAULT_LOCAL_API_PORT = 46123;
-const FORCE_DESKTOP_RUNTIME = import.meta.env.VITE_DESKTOP_RUNTIME === '1';
+const FORCE_DESKTOP_RUNTIME = ENV.VITE_DESKTOP_RUNTIME === '1';
 
 let _resolvedPort: number | null = null;
 let _portPromise: Promise<number> | null = null;
@@ -102,7 +112,7 @@ export function getApiBaseUrl(): string {
     return '';
   }
 
-  const configuredBaseUrl = import.meta.env.VITE_TAURI_API_BASE_URL;
+  const configuredBaseUrl = ENV.VITE_TAURI_API_BASE_URL;
   if (configuredBaseUrl) {
     return normalizeBaseUrl(configuredBaseUrl);
   }
@@ -110,10 +120,46 @@ export function getApiBaseUrl(): string {
   return `http://127.0.0.1:${getLocalApiPort()}`;
 }
 
+function isWorldMonitorWebHost(hostname: string): boolean {
+  return hostname === 'worldmonitor.app'
+    || hostname === 'www.worldmonitor.app'
+    || hostname.endsWith('.worldmonitor.app');
+}
+
+export function getConfiguredWebApiBaseUrl(): string {
+  if (WS_API_URL) {
+    return normalizeBaseUrl(WS_API_URL);
+  }
+
+  if (typeof window === 'undefined') {
+    return '';
+  }
+
+  if (isDesktopRuntime()) {
+    return '';
+  }
+
+  const hostname = window.location?.hostname ?? '';
+  if (!isWorldMonitorWebHost(hostname)) {
+    return '';
+  }
+
+  return DEFAULT_WEB_API_URL;
+}
+
+export function getCanonicalApiOrigin(): string {
+  return getConfiguredWebApiBaseUrl() || DEFAULT_WEB_API_URL;
+}
+
 export function getRemoteApiBaseUrl(): string {
-  const configuredRemoteBase = import.meta.env.VITE_TAURI_REMOTE_API_BASE_URL;
+  const configuredRemoteBase = ENV.VITE_TAURI_REMOTE_API_BASE_URL;
   if (configuredRemoteBase) {
     return normalizeBaseUrl(configuredRemoteBase);
+  }
+
+  const webApiBase = getConfiguredWebApiBaseUrl();
+  if (webApiBase) {
+    return webApiBase;
   }
 
   const fromHosts = DEFAULT_REMOTE_HOSTS[SITE_VARIANT] ?? DEFAULT_REMOTE_HOSTS.full ?? '';
@@ -137,6 +183,23 @@ export function toRuntimeUrl(path: string): string {
   return `${baseUrl}${path}`;
 }
 
+export function toApiUrl(path: string): string {
+  if (!path.startsWith('/')) {
+    return path;
+  }
+
+  if (isDesktopRuntime()) {
+    return toRuntimeUrl(path);
+  }
+
+  const webApiBase = getConfiguredWebApiBaseUrl();
+  if (!webApiBase) {
+    return path;
+  }
+
+  return `${webApiBase}${path}`;
+}
+
 function extractHostnames(...urls: (string | undefined)[]): string[] {
   const hosts: string[] = [];
   for (const u of urls) {
@@ -153,7 +216,7 @@ const APP_HOSTS = new Set([
   'api.worldmonitor.app',
   'localhost',
   '127.0.0.1',
-  ...extractHostnames(WS_API_URL, import.meta.env.VITE_WS_RELAY_URL),
+  ...extractHostnames(WS_API_URL, ENV.VITE_WS_RELAY_URL),
 ]);
 
 function isAppOriginUrl(urlStr: string): boolean {
@@ -194,227 +257,16 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export type SmartPollReason = 'interval' | 'resume' | 'manual' | 'startup';
-
-export interface SmartPollContext {
-  signal?: AbortSignal;
-  reason: SmartPollReason;
-  isHidden: boolean;
-}
-
-export interface SmartPollOptions {
-  intervalMs: number;
-  hiddenIntervalMs?: number;
-  hiddenMultiplier?: number;
-  pauseWhenHidden?: boolean;
-  refreshOnVisible?: boolean;
-  runImmediately?: boolean;
-  shouldRun?: () => boolean;
-  maxBackoffMultiplier?: number;
-  jitterFraction?: number;
-  minIntervalMs?: number;
-  onError?: (error: unknown) => void;
-  visibilityDebounceMs?: number;
-}
-
-export interface SmartPollLoopHandle {
-  stop: () => void;
-  trigger: () => void;
-  isActive: () => boolean;
-}
-
-function isAbortError(error: unknown): boolean {
-  if (!error || typeof error !== 'object') return false;
-  const name = (error as { name?: string }).name;
-  return name === 'AbortError';
-}
-
-function hasVisibilityApi(): boolean {
-  return typeof document !== 'undefined'
-    && typeof document.addEventListener === 'function'
-    && typeof document.removeEventListener === 'function';
-}
-
-function isDocumentHidden(): boolean {
-  return hasVisibilityApi() && document.visibilityState === 'hidden';
-}
-
-export function startSmartPollLoop(
-  poll: (ctx: SmartPollContext) => Promise<boolean | void> | boolean | void,
-  opts: SmartPollOptions,
-): SmartPollLoopHandle {
-  const intervalMs = Math.max(1_000, Math.round(opts.intervalMs));
-  const hiddenMultiplier = Math.max(1, opts.hiddenMultiplier ?? 10);
-  const pauseWhenHidden = opts.pauseWhenHidden ?? false;
-  const refreshOnVisible = opts.refreshOnVisible ?? true;
-  const runImmediately = opts.runImmediately ?? false;
-  const shouldRun = opts.shouldRun;
-  const onError = opts.onError;
-  const maxBackoffMultiplier = Math.max(1, opts.maxBackoffMultiplier ?? 4);
-  const jitterFraction = Math.max(0, opts.jitterFraction ?? 0.1);
-  const minIntervalMs = Math.max(250, opts.minIntervalMs ?? 1_000);
-  const hiddenIntervalMs = opts.hiddenIntervalMs !== undefined
-    ? Math.max(minIntervalMs, Math.round(opts.hiddenIntervalMs))
-    : undefined;
-
-  const visibilityDebounceMs = Math.max(0, opts.visibilityDebounceMs ?? 300);
-
-  let active = true;
-  let timerId: ReturnType<typeof setTimeout> | null = null;
-  let visibilityDebounceTimer: ReturnType<typeof setTimeout> | null = null;
-  let inFlight = false;
-  let backoffMultiplier = 1;
-  let activeController: AbortController | null = null;
-
-  const clearTimer = () => {
-    if (!timerId) return;
-    clearTimeout(timerId);
-    timerId = null;
-  };
-
-  const baseDelayMs = (hidden: boolean): number | null => {
-    if (hidden) {
-      if (pauseWhenHidden) return null;
-      return hiddenIntervalMs ?? (intervalMs * hiddenMultiplier);
-    }
-    return intervalMs * backoffMultiplier;
-  };
-
-  const computeDelay = (baseMs: number): number => {
-    const jitterRange = baseMs * jitterFraction;
-    const jittered = baseMs + ((Math.random() * 2 - 1) * jitterRange);
-    return Math.max(minIntervalMs, Math.round(jittered));
-  };
-
-  const scheduleNext = () => {
-    if (!active) return;
-    clearTimer();
-    const base = baseDelayMs(isDocumentHidden());
-    if (base === null) return;
-    timerId = setTimeout(() => {
-      timerId = null;
-      void runOnce('interval');
-    }, computeDelay(base));
-  };
-
-  const runOnce = async (reason: SmartPollReason): Promise<void> => {
-    if (!active) return;
-
-    const hidden = isDocumentHidden();
-    if (hidden && pauseWhenHidden) {
-      scheduleNext();
-      return;
-    }
-    if (shouldRun && !shouldRun()) {
-      scheduleNext();
-      return;
-    }
-    if (inFlight) {
-      scheduleNext();
-      return;
-    }
-
-    inFlight = true;
-    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-    activeController = controller;
-
-    try {
-      const result = await poll({
-        signal: controller?.signal,
-        reason,
-        isHidden: hidden,
-      });
-
-      if (result === false) {
-        backoffMultiplier = Math.min(backoffMultiplier * 2, maxBackoffMultiplier);
-      } else {
-        backoffMultiplier = 1;
-      }
-    } catch (error) {
-      if (!controller?.signal.aborted && !isAbortError(error)) {
-        backoffMultiplier = Math.min(backoffMultiplier * 2, maxBackoffMultiplier);
-        if (onError) onError(error);
-      }
-    } finally {
-      if (activeController === controller) activeController = null;
-      inFlight = false;
-      scheduleNext();
-    }
-  };
-
-  const clearVisibilityDebounce = () => {
-    if (visibilityDebounceTimer) {
-      clearTimeout(visibilityDebounceTimer);
-      visibilityDebounceTimer = null;
-    }
-  };
-
-  const handleVisibilityChange = () => {
-    if (!active) return;
-    const hidden = isDocumentHidden();
-
-    if (hidden) {
-      if (pauseWhenHidden) {
-        clearTimer();
-        activeController?.abort();
-        return;
-      }
-      scheduleNext();
-      return;
-    }
-
-    if (refreshOnVisible) {
-      clearTimer();
-      void runOnce('resume');
-      return;
-    }
-
-    scheduleNext();
-  };
-
-  const onVisibilityChange = () => {
-    if (!active) return;
-    // Debounce rapid visibility toggles (e.g. fast alt-tab) to prevent
-    // request bursts. Hidden→pause is applied immediately so we don't
-    // keep polling after the tab disappears.
-    if (visibilityDebounceMs > 0 && !isDocumentHidden()) {
-      clearVisibilityDebounce();
-      visibilityDebounceTimer = setTimeout(handleVisibilityChange, visibilityDebounceMs);
-      return;
-    }
-    handleVisibilityChange();
-  };
-
-  if (hasVisibilityApi()) {
-    document.addEventListener('visibilitychange', onVisibilityChange);
-  }
-
-  if (runImmediately) {
-    void runOnce('startup');
-  } else {
-    scheduleNext();
-  }
-
-  return {
-    stop: () => {
-      if (!active) return;
-      active = false;
-      clearTimer();
-      clearVisibilityDebounce();
-      activeController?.abort();
-      activeController = null;
-      if (hasVisibilityApi()) {
-        document.removeEventListener('visibilitychange', onVisibilityChange);
-      }
-    },
-    trigger: () => {
-      if (!active) return;
-      clearTimer();
-      void runOnce('manual');
-    },
-    isActive: () => active,
-  };
-}
+export {
+  startSmartPollLoop,
+  VisibilityHub,
+} from './smart-poll-loop';
+export type {
+  SmartPollContext,
+  SmartPollLoopHandle,
+  SmartPollOptions,
+  SmartPollReason,
+} from './smart-poll-loop';
 
 export async function waitForSidecarReady(timeoutMs = 3000): Promise<boolean> {
   const baseUrl = getApiBaseUrl();
@@ -440,7 +292,10 @@ function isLocalOnlyApiTarget(target: string): boolean {
 }
 
 function isKeyFreeApiTarget(target: string): boolean {
-  return target.startsWith('/api/register-interest') || target.startsWith('/api/version');
+  return target.startsWith('/api/register-interest')
+    || target.startsWith('/api/leads/v1/register-interest')
+    || target.startsWith('/api/leads/v1/submit-contact')
+    || target.startsWith('/api/version');
 }
 
 async function fetchLocalWithStartupRetry(
@@ -627,6 +482,8 @@ export function installRuntimeFetchPatch(): void {
   (window as unknown as Record<string, unknown>).__wmFetchPatched = true;
 }
 
+import { PREMIUM_RPC_PATHS as WEB_PREMIUM_API_PATHS } from '@/shared/premium-paths';
+
 const ALLOWED_REDIRECT_HOSTS = /^https:\/\/([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)*worldmonitor\.app(:\d+)?$/;
 
 function isAllowedRedirectTarget(url: string): boolean {
@@ -640,50 +497,165 @@ function isAllowedRedirectTarget(url: string): boolean {
 
 export function installWebApiRedirect(): void {
   if (isDesktopRuntime() || typeof window === 'undefined') return;
-  if (!WS_API_URL) return;
-  if (!isAllowedRedirectTarget(WS_API_URL)) {
-    console.warn('[runtime] VITE_WS_API_URL blocked — not in hostname allowlist:', WS_API_URL);
-    return;
-  }
   if ((window as unknown as Record<string, unknown>).__wmWebRedirectPatched) return;
 
+  const apiBase = getConfiguredWebApiBaseUrl();
+  const hasRedirect = !!apiBase && isAllowedRedirectTarget(apiBase);
+  if (apiBase && !hasRedirect) {
+    console.warn('[runtime] web API base blocked — not in hostname allowlist:', apiBase);
+  }
+
   const nativeFetch = window.fetch.bind(window);
-  const API_BASE = WS_API_URL;
   const shouldRedirectPath = (pathWithQuery: string): boolean => pathWithQuery.startsWith('/api/');
-  const shouldFallbackToOrigin = (status: number): boolean => status === 404 || status === 405 || status === 501 || status === 502 || status === 503;
-  const fetchWithRedirectFallback = async (
-    redirectedInput: RequestInfo | URL,
-    originalInput: RequestInfo | URL,
-    originalInit?: RequestInit,
-  ): Promise<Response> => {
+  const withCredentials = (init?: RequestInit): RequestInit => (
+    { ...(init ?? {}), credentials: init?.credentials ?? 'include' }
+  );
+
+  /**
+   * For premium API paths, inject auth when the user has premium access but no
+   * existing auth header is present. Priority order:
+   *   1. Existing auth headers — left unchanged (API key users keep their flow)
+   *   2. WORLDMONITOR_API_KEY from runtime config → X-WorldMonitor-Key
+   *   3. Tester session (wm-pro-key / wm-widget-key HttpOnly cookie)
+   *   4. Clerk Pro session → Authorization: Bearer <token>
+   * Runs on every web deployment (with or without API base redirect).
+   * Returns the original init unchanged for non-premium paths (zero overhead).
+   */
+  const enrichInitForPremium = async (pathWithQuery: string, init?: RequestInit): Promise<RequestInit | undefined> => {
+    const path = pathWithQuery.split('?')[0] ?? pathWithQuery;
+    if (!WEB_PREMIUM_API_PATHS.has(path)) return init;
+    const headers = new Headers(init?.headers);
+    // Don't overwrite existing auth headers
+    if (headers.has('Authorization') || headers.has('X-WorldMonitor-Key')) return init;
+    // WORLDMONITOR_API_KEY from env or runtime config
     try {
-      const redirectedResponse = await nativeFetch(redirectedInput, originalInit);
-      if (!shouldFallbackToOrigin(redirectedResponse.status)) return redirectedResponse;
-      return nativeFetch(originalInput, originalInit);
-    } catch {
-      return nativeFetch(originalInput, originalInit);
+      const { getRuntimeConfigSnapshot } = await import('@/services/runtime-config');
+      const wmKey = getRuntimeConfigSnapshot().secrets['WORLDMONITOR_API_KEY']?.value;
+      if (wmKey) {
+        headers.set('X-WorldMonitor-Key', wmKey);
+        return { ...withCredentials(init), headers };
+      }
+    } catch { /* runtime-config unavailable — fall through */ }
+    // Legacy test seam. In production, tester keys live in HttpOnly cookies
+    // and are sent through credentials: 'include'.
+    const { getBrowserTesterKey } = await import('@/services/widget-store');
+    const testerKey = getBrowserTesterKey();
+    if (testerKey) {
+      headers.set('X-WorldMonitor-Key', testerKey);
+      return { ...withCredentials(init), headers };
     }
+    // Clerk Pro: inject Bearer token (fallback for users without a tester key)
+    const token = await getClerkToken();
+    if (token) {
+      headers.set('Authorization', `Bearer ${token}`);
+      return { ...withCredentials(init), headers };
+    }
+    return init;
   };
 
-  window.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-    if (typeof input === 'string' && shouldRedirectPath(input)) {
-      return fetchWithRedirectFallback(`${API_BASE}${input}`, input, init);
-    }
-    if (input instanceof URL && input.origin === window.location.origin && shouldRedirectPath(`${input.pathname}${input.search}`)) {
-      return fetchWithRedirectFallback(new URL(`${API_BASE}${input.pathname}${input.search}`), input, init);
-    }
-    if (input instanceof Request) {
-      const u = new URL(input.url);
-      if (u.origin === window.location.origin && shouldRedirectPath(`${u.pathname}${u.search}`)) {
-        return fetchWithRedirectFallback(
-          new Request(`${API_BASE}${u.pathname}${u.search}`, input),
-          input.clone(),
-          init,
-        );
+  if (hasRedirect) {
+    const API_BASE = apiBase;
+    const shouldFallbackToOrigin = (status: number): boolean => (
+      status === 404 || status === 405 || status === 501 || status === 502 || status === 503
+    );
+    const fetchWithRedirectFallback = async (
+      redirectedInput: RequestInfo | URL,
+      originalInput: RequestInfo | URL,
+      originalInit?: RequestInit,
+    ): Promise<Response> => {
+      try {
+        const redirectedResponse = await nativeFetch(redirectedInput, originalInit);
+        if (!shouldFallbackToOrigin(redirectedResponse.status)) return redirectedResponse;
+        return nativeFetch(originalInput, originalInit);
+      } catch (error) {
+        try {
+          return await nativeFetch(originalInput, originalInit);
+        } catch {
+          throw error;
+        }
       }
-    }
-    return nativeFetch(input, init);
-  };
+    };
+
+    window.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      if (typeof input === 'string') {
+        if (shouldRedirectPath(input)) {
+          // Relative /api/... path — redirect to API base and inject auth.
+          const enriched = await enrichInitForPremium(input, init);
+          return fetchWithRedirectFallback(`${API_BASE}${input}`, input, enriched ? withCredentials(enriched) : withCredentials(init));
+        }
+        // Absolute URL already targeting the API base (generated clients call fetch
+        // with full URLs like https://api.worldmonitor.app/api/...) — just inject auth.
+        if (input.startsWith(`${API_BASE}/api/`)) {
+          const pathAndSearch = input.slice(API_BASE.length);
+          const enriched = await enrichInitForPremium(pathAndSearch, init);
+          return nativeFetch(input, enriched ? withCredentials(enriched) : withCredentials(init));
+        }
+      }
+      if (input instanceof URL) {
+        const pathAndSearch = `${input.pathname}${input.search}`;
+        if (input.origin === window.location.origin && shouldRedirectPath(pathAndSearch)) {
+          const enriched = await enrichInitForPremium(pathAndSearch, init);
+          return fetchWithRedirectFallback(new URL(`${API_BASE}${pathAndSearch}`), input, enriched ? withCredentials(enriched) : withCredentials(init));
+        }
+        // URL object already targeting the API base.
+        if (input.origin === API_BASE && pathAndSearch.startsWith('/api/')) {
+          const enriched = await enrichInitForPremium(pathAndSearch, init);
+          return nativeFetch(input, enriched ? withCredentials(enriched) : withCredentials(init));
+        }
+      }
+      if (input instanceof Request) {
+        const u = new URL(input.url);
+        const pathAndSearch = `${u.pathname}${u.search}`;
+        if (u.origin === window.location.origin && shouldRedirectPath(pathAndSearch)) {
+          const enriched = await enrichInitForPremium(pathAndSearch, init);
+          return fetchWithRedirectFallback(
+            new Request(`${API_BASE}${pathAndSearch}`, input),
+            input.clone(),
+            enriched ? withCredentials(enriched) : withCredentials(init),
+          );
+        }
+        // Request object already targeting the API base.
+        if (u.origin === API_BASE && pathAndSearch.startsWith('/api/')) {
+          const enriched = await enrichInitForPremium(pathAndSearch, init);
+          return nativeFetch(new Request(input, enriched ? withCredentials(enriched) : withCredentials(init)));
+        }
+      }
+      return nativeFetch(input, init);
+    };
+  } else {
+    // No API base redirect — only inject auth headers for premium paths.
+    window.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      if (typeof input === 'string') {
+        if (shouldRedirectPath(input)) {
+          const enriched = await enrichInitForPremium(input, init);
+          return nativeFetch(input, enriched ? withCredentials(enriched) : withCredentials(init));
+        }
+        if (input.startsWith(`${DEFAULT_WEB_API_URL}/api/`)) {
+          const pathAndSearch = input.slice(DEFAULT_WEB_API_URL.length);
+          const enriched = await enrichInitForPremium(pathAndSearch, init);
+          return nativeFetch(input, enriched ? withCredentials(enriched) : withCredentials(init));
+        }
+      }
+      if (input instanceof URL) {
+        const pathAndSearch = `${input.pathname}${input.search}`;
+        if ((input.origin === window.location.origin || input.origin === DEFAULT_WEB_API_URL)
+            && (shouldRedirectPath(pathAndSearch) || pathAndSearch.startsWith('/api/'))) {
+          const enriched = await enrichInitForPremium(pathAndSearch, init);
+          return nativeFetch(input, enriched ? withCredentials(enriched) : withCredentials(init));
+        }
+      }
+      if (input instanceof Request) {
+        const u = new URL(input.url);
+        const pathAndSearch = `${u.pathname}${u.search}`;
+        if ((u.origin === window.location.origin || u.origin === DEFAULT_WEB_API_URL)
+            && (shouldRedirectPath(pathAndSearch) || pathAndSearch.startsWith('/api/'))) {
+          const enriched = await enrichInitForPremium(pathAndSearch, init);
+          return nativeFetch(new Request(input, enriched ? withCredentials(enriched) : withCredentials(init)));
+        }
+      }
+      return nativeFetch(input, init);
+    };
+  }
 
   (window as unknown as Record<string, unknown>).__wmWebRedirectPatched = true;
 }

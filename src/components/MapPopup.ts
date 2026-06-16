@@ -1,20 +1,92 @@
 import type { ConflictZone, Hotspot, NewsItem, MilitaryBase, StrategicWaterway, APTGroup, NuclearFacility, EconomicCenter, GammaIrradiator, Pipeline, UnderseaCable, CableAdvisory, RepairShip, InternetOutage, AIDataCenter, AisDisruptionEvent, SocialUnrestEvent, MilitaryFlight, MilitaryVessel, MilitaryFlightCluster, MilitaryVesselCluster, NaturalEvent, Port, Spaceport, CriticalMineralProject, CyberThreat } from '@/types';
+import type { TradeRouteSegment } from '@/config/trade-routes';
 import type { AirportDelayAlert, PositionSample } from '@/services/aviation';
 import type { Earthquake } from '@/services/earthquakes';
 import type { WeatherAlert } from '@/services/weather';
+import type { RadiationObservation } from '@/services/radiation';
 import { UNDERSEA_CABLES } from '@/config';
 import type { StartupHub, Accelerator, TechHQ, CloudRegion } from '@/config/tech-geo';
 import type { TechHubActivity } from '@/services/tech-activity';
 import type { GeoHubActivity } from '@/services/geo-activity';
 import { escapeHtml, sanitizeUrl } from '@/utils/sanitize';
 import { isMobileDevice, getCSSColor } from '@/utils';
+import { TransitChart } from '@/utils/transit-chart';
+import { HS2RingChart } from '@/utils/hs2-ring-chart';
+import type { GetChokepointStatusResponse, TransitDayCount } from '@/services/supply-chain';
+import { fetchChokepointHistory } from '@/services/supply-chain';
 import { t } from '@/services/i18n';
 import { fetchHotspotContext, formatArticleDate, extractDomain, type GdeltArticle } from '@/services/gdelt-intel';
+import { getWingbitsLiveFlight } from '@/services/wingbits';
+import { isFeatureAvailable } from '@/services/runtime-config';
 import { getNaturalEventIcon } from '@/services/eonet';
 import { getHotspotEscalation, getEscalationChange24h } from '@/services/hotspot-escalation';
 import { getCableHealthRecord } from '@/services/cable-health';
+import { nameToCountryCode } from '@/services/country-geometry';
+import { sparkline } from '@/utils/sparkline';
+import { getAuthState } from '@/services/auth-state';
+import { hasPremiumAccess } from '@/services/panel-gating';
+import { trackGateHit } from '@/services/analytics';
+import { renderPopupSourceLinks } from './map-popup-source-links';
+import { setTrustedHtml, trustedHtml } from '@/utils/dom-utils';
 
-export type PopupType = 'conflict' | 'hotspot' | 'earthquake' | 'weather' | 'base' | 'waterway' | 'apt' | 'cyberThreat' | 'nuclear' | 'economic' | 'irradiator' | 'pipeline' | 'cable' | 'cable-advisory' | 'repair-ship' | 'outage' | 'datacenter' | 'datacenterCluster' | 'ais' | 'protest' | 'protestCluster' | 'flight' | 'aircraft' | 'militaryFlight' | 'militaryVessel' | 'militaryFlightCluster' | 'militaryVesselCluster' | 'natEvent' | 'port' | 'spaceport' | 'mineral' | 'startupHub' | 'cloudRegion' | 'techHQ' | 'accelerator' | 'techEvent' | 'techHQCluster' | 'techEventCluster' | 'techActivity' | 'geoActivity' | 'stockExchange' | 'financialCenter' | 'centralBank' | 'commodityHub' | 'iranEvent' | 'gpsJamming';
+
+// ── Static HS2 sector breakdown per chokepoint ────────────────────────────────
+// Based on IEA/UNCTAD estimated trade composition. Updated periodically.
+// Each entry: [label, share (0-100), color]
+const CHOKEPOINT_HS2_SECTORS: Record<string, Array<{ label: string; share: number; color: string }>> = {
+  suez:            [{ label: 'Energy', share: 30, color: '#f97316' }, { label: 'Machinery', share: 22, color: '#3b82f6' }, { label: 'Chemicals', share: 16, color: '#a855f7' }, { label: 'Food', share: 14, color: '#22c55e' }, { label: 'Other', share: 18, color: '#64748b' }],
+  malacca_strait:  [{ label: 'Energy', share: 34, color: '#f97316' }, { label: 'Electronics', share: 25, color: '#3b82f6' }, { label: 'Chemicals', share: 14, color: '#a855f7' }, { label: 'Food', share: 12, color: '#22c55e' }, { label: 'Other', share: 15, color: '#64748b' }],
+  hormuz_strait:   [{ label: 'Energy', share: 78, color: '#f97316' }, { label: 'Chemicals', share: 9, color: '#a855f7' }, { label: 'Food', share: 7, color: '#22c55e' }, { label: 'Other', share: 6, color: '#64748b' }],
+  bab_el_mandeb:   [{ label: 'Energy', share: 32, color: '#f97316' }, { label: 'Machinery', share: 20, color: '#3b82f6' }, { label: 'Chemicals', share: 15, color: '#a855f7' }, { label: 'Food', share: 13, color: '#22c55e' }, { label: 'Other', share: 20, color: '#64748b' }],
+  panama:          [{ label: 'Bulk', share: 28, color: '#eab308' }, { label: 'Energy', share: 18, color: '#f97316' }, { label: 'Containers', share: 35, color: '#3b82f6' }, { label: 'Other', share: 19, color: '#64748b' }],
+  taiwan_strait:   [{ label: 'Electronics', share: 40, color: '#3b82f6' }, { label: 'Machinery', share: 22, color: '#6366f1' }, { label: 'Energy', share: 14, color: '#f97316' }, { label: 'Chemicals', share: 12, color: '#a855f7' }, { label: 'Other', share: 12, color: '#64748b' }],
+  cape_of_good_hope: [{ label: 'Bulk', share: 35, color: '#eab308' }, { label: 'Energy', share: 22, color: '#f97316' }, { label: 'Containers', share: 28, color: '#3b82f6' }, { label: 'Other', share: 15, color: '#64748b' }],
+  gibraltar:       [{ label: 'Containers', share: 30, color: '#3b82f6' }, { label: 'Energy', share: 25, color: '#f97316' }, { label: 'Bulk', share: 20, color: '#eab308' }, { label: 'Other', share: 25, color: '#64748b' }],
+  bosphorus:       [{ label: 'Energy', share: 58, color: '#f97316' }, { label: 'Bulk', share: 18, color: '#eab308' }, { label: 'Containers', share: 14, color: '#3b82f6' }, { label: 'Other', share: 10, color: '#64748b' }],
+};
+
+function renderSectorRing(sectors: Array<{ label: string; share: number; color: string }>): string {
+  const R = 28;
+  const cx = 36;
+  const cy = 36;
+  const circumference = 2 * Math.PI * R;
+  let cumulativeOffset = 0;
+  const segments = sectors.map(s => {
+    const dash = (s.share / 100) * circumference;
+    const segment = `<circle cx="${cx}" cy="${cy}" r="${R}" fill="none" stroke="${s.color}" stroke-width="10" stroke-dasharray="${dash.toFixed(2)} ${(circumference - dash).toFixed(2)}" stroke-dashoffset="${(-cumulativeOffset).toFixed(2)}" />`;
+    cumulativeOffset += dash;
+    return segment;
+  });
+  const legend = sectors.map(s => `<span class="sector-legend-item"><span class="sector-dot" style="background:${s.color}"></span>${escapeHtml(s.label)}&nbsp;${s.share}%</span>`).join(' \u00B7 ');
+  return `
+    <div class="sector-ring-wrap">
+      <svg width="72" height="72" viewBox="0 0 72 72" style="transform:rotate(-90deg)">${segments.join('')}</svg>
+      <div class="sector-legend">${legend}</div>
+    </div>`;
+}
+
+function formatPositionSource(source: string): string {
+  if (source === 'POSITION_SOURCE_WINGBITS') {
+    return '<a href="https://wingbits.com?utm_source=worldmonitor&utm_medium=referral&utm_campaign=worldmonitor" target="_blank" rel="noopener" style="color:inherit">wingbits.com</a>';
+  }
+  if (source === 'POSITION_SOURCE_OPENSKY') {
+    return '<a href="https://opensky-network.org" target="_blank" rel="noopener" style="color:inherit">opensky-network.org</a>';
+  }
+  return escapeHtml(source);
+}
+
+function fmtUtcTime(utc: string | undefined): string {
+  if (!utc) return '\u2014';
+  const d = new Date(utc.includes('T') ? utc : utc.replace(' ', 'T') + 'Z');
+  return Number.isNaN(d.getTime()) ? '\u2014' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function fmtDelayMin(min: number | undefined): string {
+  if (min === undefined || min === 0) return '';
+  return `<span style="color:${min > 0 ? '#f97316' : '#22c55e'};font-size:10px;margin-left:3px">${min > 0 ? '+' : ''}${min}m</span>`;
+}
+
+export type PopupType = 'conflict' | 'hotspot' | 'earthquake' | 'weather' | 'base' | 'waterway' | 'apt' | 'cyberThreat' | 'nuclear' | 'economic' | 'irradiator' | 'pipeline' | 'cable' | 'cable-advisory' | 'repair-ship' | 'outage' | 'datacenter' | 'datacenterCluster' | 'ais' | 'protest' | 'protestCluster' | 'flight' | 'aircraft' | 'militaryFlight' | 'militaryVessel' | 'militaryFlightCluster' | 'militaryVesselCluster' | 'natEvent' | 'port' | 'spaceport' | 'mineral' | 'startupHub' | 'cloudRegion' | 'techHQ' | 'accelerator' | 'techEvent' | 'techHQCluster' | 'techEventCluster' | 'techActivity' | 'geoActivity' | 'stockExchange' | 'financialCenter' | 'centralBank' | 'commodityHub' | 'iranEvent' | 'gpsJamming' | 'radiation';
 
 interface TechEventPopupData {
   id: string;
@@ -143,7 +215,7 @@ interface DatacenterClusterData {
 
 interface PopupData {
   type: PopupType;
-  data: ConflictZone | Hotspot | Earthquake | WeatherAlert | MilitaryBase | StrategicWaterway | APTGroup | CyberThreat | NuclearFacility | EconomicCenter | GammaIrradiator | Pipeline | UnderseaCable | CableAdvisory | RepairShip | InternetOutage | AIDataCenter | AisDisruptionEvent | SocialUnrestEvent | AirportDelayAlert | PositionSample | MilitaryFlight | MilitaryVessel | MilitaryFlightCluster | MilitaryVesselCluster | NaturalEvent | Port | Spaceport | CriticalMineralProject | StartupHub | CloudRegion | TechHQ | Accelerator | TechEventPopupData | TechHQClusterData | TechEventClusterData | ProtestClusterData | DatacenterClusterData | TechHubActivity | GeoHubActivity | StockExchangePopupData | FinancialCenterPopupData | CentralBankPopupData | CommodityHubPopupData | IranEventPopupData | GpsJammingPopupData;
+  data: ConflictZone | Hotspot | Earthquake | WeatherAlert | MilitaryBase | StrategicWaterway | APTGroup | CyberThreat | NuclearFacility | EconomicCenter | GammaIrradiator | Pipeline | UnderseaCable | CableAdvisory | RepairShip | InternetOutage | AIDataCenter | AisDisruptionEvent | SocialUnrestEvent | AirportDelayAlert | PositionSample | MilitaryFlight | MilitaryVessel | MilitaryFlightCluster | MilitaryVesselCluster | NaturalEvent | Port | Spaceport | CriticalMineralProject | StartupHub | CloudRegion | TechHQ | Accelerator | TechEventPopupData | TechHQClusterData | TechEventClusterData | ProtestClusterData | DatacenterClusterData | TechHubActivity | GeoHubActivity | StockExchangePopupData | FinancialCenterPopupData | CentralBankPopupData | CommodityHubPopupData | IranEventPopupData | GpsJammingPopupData | RadiationObservation;
   relatedNews?: NewsItem[];
   x: number;
   y: number;
@@ -155,6 +227,12 @@ export class MapPopup {
   private onClose?: () => void;
   private cableAdvisories: CableAdvisory[] = [];
   private repairShips: RepairShip[] = [];
+  private chokepointData: GetChokepointStatusResponse | null = null;
+  private transitChart: TransitChart | null = null;
+  // Session-scoped cache: history is now lazy-loaded via GetChokepointHistory
+  // when a waterway popup opens (main status RPC omits it to keep payloads small).
+  private static historyCache = new Map<string, TransitDayCount[]>();
+  private static historyInflight = new Set<string>();
   private isMobileSheet = false;
   private sheetTouchStartY: number | null = null;
   private sheetCurrentOffset = 0;
@@ -165,6 +243,10 @@ export class MapPopup {
     this.container = container;
   }
 
+  public setChokepointData(data: GetChokepointStatusResponse | null): void {
+    this.chokepointData = data;
+  }
+
   public show(data: PopupData): void {
     this.hide();
 
@@ -173,9 +255,9 @@ export class MapPopup {
     this.popup.className = this.isMobileSheet ? 'map-popup map-popup-sheet' : 'map-popup';
 
     const content = this.renderContent(data);
-    this.popup.innerHTML = this.isMobileSheet
+    setTrustedHtml(this.popup, trustedHtml(this.isMobileSheet
       ? `<button class="map-popup-sheet-handle" aria-label="${t('common.close')}"></button>${content}`
-      : content;
+      : content, "legacy direct innerHTML migration"));
 
     // Get container's viewport position for absolute positioning
     const containerRect = this.container.getBoundingClientRect();
@@ -190,6 +272,72 @@ export class MapPopup {
 
     // Append to body to avoid container overflow clipping
     document.body.appendChild(this.popup);
+
+    // Mount transit chart for waterway popups after DOM insertion
+    if (data.type === 'waterway') {
+      const waterway = data.data as StrategicWaterway;
+      const cp = this.chokepointData?.chokepoints?.find(
+        c => c.id === waterway.chokepointId,
+      );
+      const chartEl = this.popup.querySelector<HTMLElement>('[data-transit-chart]');
+      const cpId = cp?.id ?? '';
+      const isPro = hasPremiumAccess(getAuthState());
+
+      if (chartEl && cpId && isPro) {
+        const cached = MapPopup.historyCache.get(cpId);
+        if (cached && cached.length) {
+          this.transitChart = new TransitChart();
+          this.transitChart.mount(chartEl, cached);
+        } else if (!MapPopup.historyInflight.has(cpId)) {
+          // We cache ONLY non-empty successful responses. An empty-array result
+          // or error is not cached, so re-opening the popup retries. Caching []
+          // would poison the chokepoint for the session — empty-array is
+          // truthy in JS, so `cached && cached.length` is false AND
+          // `!cached` is also false → neither branch fires, popup stuck on
+          // "Loading…". The /get-chokepoint-history gateway tier is "slow"
+          // (5-min CF edge cache) so retries stay cheap.
+          MapPopup.historyInflight.add(cpId);
+          void fetchChokepointHistory(cpId).then(resp => {
+            MapPopup.historyInflight.delete(cpId);
+            // Re-query keyed by cpId — if the user opened a different popup
+            // since this fetch started, the live [data-transit-chart] element
+            // belongs to the NEW chokepoint. Matching by id prevents mounting
+            // A's history into B's chart container.
+            const liveEl = this.popup?.querySelector<HTMLElement>(`[data-transit-chart-id="${cpId}"]`);
+            if (!liveEl) return;
+            if (resp.history.length) {
+              MapPopup.historyCache.set(cpId, resp.history);
+              liveEl.textContent = '';
+              this.transitChart = new TransitChart();
+              this.transitChart.mount(liveEl, resp.history);
+            } else {
+              liveEl.textContent = t('components.supplyChain.historyUnavailable') || 'History unavailable';
+            }
+          }).catch(() => {
+            MapPopup.historyInflight.delete(cpId);
+            const liveEl = this.popup?.querySelector<HTMLElement>(`[data-transit-chart-id="${cpId}"]`);
+            if (liveEl) liveEl.textContent = t('components.supplyChain.historyUnavailable') || 'History unavailable';
+          });
+        }
+      }
+      // Track PRO gate impression for transit chart — we always render the gate
+      // for non-PRO users on chokepoints (history is a PRO feature); this
+      // doesn't depend on whether history has resolved.
+      if (cpId && !isPro) {
+        trackGateHit('chokepoint-transit-chart');
+      }
+
+      // Mount HS2 sector ring chart for PRO users
+      const sectors = CHOKEPOINT_HS2_SECTORS[waterway.chokepointId];
+      if (sectors?.length) {
+        const ringEl = this.popup.querySelector<HTMLElement>(`[data-hs2-ring="${waterway.chokepointId}"]`);
+        if (ringEl) {
+          new HS2RingChart().mount(ringEl, sectors);
+        } else if (!hasPremiumAccess(getAuthState())) {
+          trackGateHit('chokepoint-sector-ring');
+        }
+      }
+    }
 
     // Close button handler via event delegation on the popup element.
     // This avoids re-querying and re-attaching listeners after innerHTML.
@@ -234,6 +382,87 @@ export class MapPopup {
       document.addEventListener('keydown', this.handleEscapeKey);
       this.outsideListenerTimeoutId = null;
     }, 0);
+  }
+
+  public showRouteBreakdown(
+    segment: TradeRouteSegment,
+    chokepointIds: string[],
+    x: number,
+    y: number,
+  ): void {
+    this.hide();
+
+    // Pick the waypoint with the highest disruption score — this is the driver of the arc
+    // color computed in refreshTradeRouteStatus() and must match what the user sees on the arc.
+    const allCps = this.chokepointData?.chokepoints ?? [];
+    const primaryCpId =
+      chokepointIds
+        .map(id => ({ id, score: allCps.find(c => c.id === id)?.disruptionScore ?? 0 }))
+        .sort((a, b) => b.score - a.score)[0]?.id ?? chokepointIds[0] ?? '';
+    const cp = allCps.find(c => c.id === primaryCpId);
+    const sectors = primaryCpId ? (CHOKEPOINT_HS2_SECTORS[primaryCpId] ?? []) : [];
+
+    const tierLabel: Record<string, string> = {
+      WAR_RISK_TIER_WAR_ZONE: 'War Zone', WAR_RISK_TIER_CRITICAL: 'Critical',
+      WAR_RISK_TIER_HIGH: 'High', WAR_RISK_TIER_ELEVATED: 'Elevated',
+      WAR_RISK_TIER_NORMAL: 'Normal',
+    };
+    const tierColor: Record<string, string> = {
+      WAR_RISK_TIER_WAR_ZONE: '#ef4444', WAR_RISK_TIER_CRITICAL: '#ef4444',
+      WAR_RISK_TIER_HIGH: '#f59e0b', WAR_RISK_TIER_ELEVATED: '#f59e0b',
+      WAR_RISK_TIER_NORMAL: 'var(--text-dim,#888)',
+    };
+
+    const tier = cp?.warRiskTier ?? 'WAR_RISK_TIER_NORMAL';
+    const disruptionScore = cp?.disruptionScore ?? 0;
+    const scoreColor = disruptionScore > 70 ? '#ef4444' : disruptionScore > 30 ? '#f59e0b' : 'var(--text-dim,#888)';
+
+    const topSectors = sectors.slice(0, 2);
+    const sectorHtml = topSectors.length
+      ? topSectors.map(s =>
+          `<span style="display:inline-flex;align-items:center;gap:3px;margin-right:6px">` +
+          `<span style="width:8px;height:8px;border-radius:50%;background:${s.color};display:inline-block"></span>` +
+          `<span style="font-size:10px">${escapeHtml(s.label)} ${s.share}%</span></span>`
+        ).join('')
+      : `<span style="font-size:10px;opacity:.5">No sector data</span>`;
+
+    const html = `
+      <div class="popup-header">
+        <span class="popup-title" style="font-size:12px">${escapeHtml(segment.routeName)}</span>
+        <button class="popup-close" aria-label="Close">×</button>
+      </div>
+      <div class="popup-body" style="padding:8px 12px;min-width:200px">
+        ${cp ? `<div style="font-size:11px;font-weight:600;margin-bottom:6px">${escapeHtml(cp.name)}</div>` : ''}
+        <div style="display:flex;gap:10px;margin-bottom:6px">
+          <span style="font-size:10px;opacity:.6">Disruption</span>
+          <span style="font-size:10px;font-weight:600;color:${scoreColor}">${disruptionScore}/100</span>
+        </div>
+        <div style="display:flex;gap:10px;margin-bottom:6px">
+          <span style="font-size:10px;opacity:.6">War Risk</span>
+          <span style="font-size:10px;font-weight:600;color:${tierColor[tier] ?? 'inherit'}">${tierLabel[tier] ?? 'Normal'}</span>
+        </div>
+        <div style="margin-top:4px">${sectorHtml}</div>
+      </div>`;
+
+    this.isMobileSheet = false;
+    this.popup = document.createElement('div');
+    this.popup.className = 'map-popup map-popup-route-breakdown';
+    setTrustedHtml(this.popup, trustedHtml(html, "legacy direct innerHTML migration"));
+
+    const containerRect = this.container.getBoundingClientRect();
+    this.positionDesktopPopup({ x, y, type: 'waterway', data: {} as never }, containerRect);
+    document.body.appendChild(this.popup);
+
+    this.popup.addEventListener('click', (e) => {
+      if ((e.target as HTMLElement).closest('.popup-close')) this.hide();
+    });
+
+    if (this.outsideListenerTimeoutId !== null) clearTimeout(this.outsideListenerTimeoutId);
+    this.outsideListenerTimeoutId = window.setTimeout(() => {
+      this.outsideListenerTimeoutId = null;
+      document.addEventListener('click', this.handleOutsideClick);
+      document.addEventListener('keydown', this.handleEscapeKey);
+    }, 200);
   }
 
   private positionDesktopPopup(data: PopupData, containerRect: DOMRect): void {
@@ -289,6 +518,20 @@ export class MapPopup {
 
     this.popup.style.left = `${left}px`;
     this.popup.style.top = `${top}px`;
+  }
+
+  // Called after async content (e.g. Wingbits live data) makes the popup taller.
+  // Nudges the popup upward so it never extends below the viewport.
+  private clampPopupToViewport(): void {
+    if (!this.popup || this.isMobileSheet) return;
+    const rect = this.popup.getBoundingClientRect();
+    const bottomBuffer = 20;
+    const topBuffer = 60;
+    const overflow = rect.bottom - (window.innerHeight - bottomBuffer);
+    if (overflow > 0) {
+      const currentTop = Number.parseFloat(this.popup.style.top) || 0;
+      this.popup.style.top = `${Math.max(topBuffer, currentTop - overflow)}px`;
+    }
   }
 
   private handleOutsideClick = (e: Event) => {
@@ -350,6 +593,9 @@ export class MapPopup {
   };
 
   public hide(): void {
+    this.transitChart?.destroy();
+    this.transitChart = null;
+
     if (this.outsideListenerTimeoutId !== null) {
       window.clearTimeout(this.outsideListenerTimeoutId);
       this.outsideListenerTimeoutId = null;
@@ -472,9 +718,59 @@ export class MapPopup {
         return this.renderIranEventPopup(data.data as IranEventPopupData);
       case 'gpsJamming':
         return this.renderGpsJammingPopup(data.data as GpsJammingPopupData);
+      case 'radiation':
+        return this.renderRadiationPopup(data.data as RadiationObservation);
       default:
         return '';
     }
+  }
+
+  private renderRadiationPopup(observation: RadiationObservation): string {
+    const severityClass = observation.severity === 'spike' ? 'high' : 'medium';
+    const delta = `${observation.delta >= 0 ? '+' : ''}${observation.delta.toFixed(1)} ${escapeHtml(observation.unit)}`;
+    const provenance = formatRadiationSources(observation);
+    const confidence = formatRadiationConfidence(observation.confidence);
+    const flags = [
+      observation.corroborated ? 'Confirmed' : '',
+      observation.conflictingSources ? 'Conflicting sources' : '',
+      observation.convertedFromCpm ? 'CPM-derived component' : '',
+    ].filter(Boolean).join(' · ');
+    return `
+      <div class="popup-header outage">
+        <span class="popup-title">☢ ${escapeHtml(observation.location.toUpperCase())}</span>
+        <span class="popup-badge ${severityClass}">${escapeHtml(observation.severity.toUpperCase())}</span>
+        <button class="popup-close" aria-label="Close">×</button>
+      </div>
+      <div class="popup-body">
+        <div class="popup-stats">
+          <div class="popup-stat">
+            <span class="stat-label">Reading</span>
+            <span class="stat-value">${observation.value.toFixed(1)} ${escapeHtml(observation.unit)}</span>
+          </div>
+          <div class="popup-stat">
+            <span class="stat-label">Baseline</span>
+            <span class="stat-value">${observation.baselineValue.toFixed(1)} ${escapeHtml(observation.unit)}</span>
+          </div>
+          <div class="popup-stat">
+            <span class="stat-label">Delta</span>
+            <span class="stat-value">${delta}</span>
+          </div>
+          <div class="popup-stat">
+            <span class="stat-label">Confidence</span>
+            <span class="stat-value">${escapeHtml(confidence)}</span>
+          </div>
+          <div class="popup-stat">
+            <span class="stat-label">Sources</span>
+            <span class="stat-value">${escapeHtml(provenance)}</span>
+          </div>
+          <div class="popup-stat">
+            <span class="stat-label">Source count</span>
+            <span class="stat-value">${observation.sourceCount}</span>
+          </div>
+        </div>
+        <p class="popup-description">${escapeHtml(observation.country)} · z-score ${observation.zScore.toFixed(2)} · ${escapeHtml(observation.freshness)}${flags ? ` · ${escapeHtml(flags)}` : ''}</p>
+      </div>
+    `;
   }
 
 
@@ -589,6 +885,12 @@ export class MapPopup {
             <span class="trend-icon">${trendIcons[displayTrend] || ''}</span>
             <span class="trend-label">${escapeHtml(displayTrend.toUpperCase())}</span>
           </div>
+          ${dynamicScore?.history && dynamicScore.history.length >= 3 ? (() => {
+            const vals = dynamicScore.history.slice(-20).map(h => h.score);
+            const lastVal = vals[vals.length - 1] ?? 3;
+            const color = lastVal >= 4 ? '#f44336' : lastVal >= 3 ? '#ff9800' : '#4caf50';
+            return sparkline(vals, color, 80, 24, 'opacity:0.9');
+          })() : ''}
         </div>
         ${dynamicScore ? `
           <div class="escalation-breakdown">
@@ -760,25 +1062,132 @@ export class MapPopup {
       if (!this.popup || !container.isConnected) return;
 
       if (articles.length === 0) {
-        container.innerHTML = `
+        setTrustedHtml(container, trustedHtml(`
           <div class="hotspot-gdelt-header">${t('popups.liveIntel')}</div>
           <div class="hotspot-gdelt-loading">${t('popups.noCoverage')}</div>
-        `;
+        `, "legacy direct innerHTML migration"));
         return;
       }
 
-      container.innerHTML = `
+      setTrustedHtml(container, trustedHtml(`
         <div class="hotspot-gdelt-header">${t('popups.liveIntel')}</div>
         <div class="hotspot-gdelt-articles">
           ${articles.slice(0, 5).map(article => this.renderGdeltArticle(article)).join('')}
         </div>
-      `;
+      `, "legacy direct innerHTML migration"));
     } catch (error) {
       if (container.isConnected) {
-        container.innerHTML = `
+        setTrustedHtml(container, trustedHtml(`
           <div class="hotspot-gdelt-header">${t('popups.liveIntel')}</div>
           <div class="hotspot-gdelt-loading">${t('common.error')}</div>
-        `;
+        `, "legacy direct innerHTML migration"));
+      }
+    }
+  }
+
+  public async loadWingbitsLiveFlight(hexCode: string): Promise<void> {
+    if (!this.popup) return;
+
+    const section = this.popup.querySelector('.wingbits-live-section');
+    if (!section) return;
+
+    try {
+      const live = await getWingbitsLiveFlight(hexCode);
+
+      if (!this.popup || !section.isConnected) return;
+
+      if (!live) {
+        setTrustedHtml(section, trustedHtml('', "legacy direct innerHTML migration"));
+        return;
+      }
+
+      const parts: string[] = [];
+      let photoHtml = '';
+
+      // Photo — built separately so it renders at the bottom after route/times/stats
+      if (live.photoUrl) {
+        const photoSrc = sanitizeUrl(live.photoUrl);
+        if (photoSrc) {
+          const photoLink = live.photoLink ? sanitizeUrl(live.photoLink) : '#';
+          const credit = live.photoCredit ? `<span class="flight-photo-credit">\u00a9 ${escapeHtml(live.photoCredit)}</span>` : '';
+          photoHtml = `<div class="flight-photo"><a href="${photoLink}" target="_blank" rel="noopener"><img src="${photoSrc}" alt="${escapeHtml(live.callsign)}" style="width:100%;border-radius:4px;display:block"></a>${credit}</div>`;
+        }
+      }
+
+      // IATA callsign + airline name header
+      if (live.callsignIata) {
+        const name = live.airlineName ? ` <span style="font-size:12px;opacity:0.6;font-weight:400">${escapeHtml(live.airlineName)}</span>` : '';
+        parts.push(`<div style="font-weight:700;font-size:15px;margin:4px 0">${escapeHtml(live.callsignIata)}${name}</div>`);
+      }
+
+      // Route (FROM → TO)
+      if (live.depIata && live.arrIata) {
+        const terminal = live.arrTerminal ? `<span style="font-size:10px;opacity:0.5;margin-left:4px">T${escapeHtml(live.arrTerminal)}</span>` : '';
+        const duration = live.flightDurationMin ? `<span style="font-size:11px;opacity:0.6">${Math.floor(live.flightDurationMin / 60)}h${live.flightDurationMin % 60 > 0 ? ` ${live.flightDurationMin % 60}m` : ''}</span>` : '';
+        parts.push(`
+          <div class="flight-route" style="display:flex;align-items:center;gap:6px;margin:8px 0 4px;font-weight:700;font-size:18px">
+            <span>${escapeHtml(live.depIata)}</span>
+            <span style="font-size:12px;opacity:0.4;font-weight:400">&#9992;</span>
+            <span>${escapeHtml(live.arrIata)}${terminal}</span>
+            <span style="flex:1;text-align:right">${duration}</span>
+          </div>`);
+
+        const depSched = fmtUtcTime(live.depTimeUtc);
+        const arrSched = fmtUtcTime(live.arrTimeUtc);
+        const depEst = fmtUtcTime(live.depEstimatedUtc);
+        const arrEst = fmtUtcTime(live.arrEstimatedUtc);
+        const hasDelay = live.depDelayedMin !== 0 || live.arrDelayedMin !== 0;
+
+        parts.push(`
+          <div class="flight-times" style="font-size:11px;display:grid;grid-template-columns:1fr auto 1fr;gap:2px 8px;margin-bottom:6px;opacity:0.85">
+            <span style="opacity:0.5;font-size:10px;text-transform:uppercase">DEP</span>
+            <span></span>
+            <span style="opacity:0.5;font-size:10px;text-transform:uppercase;text-align:right">ARR</span>
+            <span style="opacity:0.5;font-size:10px">${t('popups.flight.scheduled') || 'Sched'}</span><span></span><span style="opacity:0.5;font-size:10px;text-align:right">${t('popups.flight.scheduled') || 'Sched'}</span>
+            <span>${depSched}</span><span style="opacity:0.3;text-align:center">\u2194</span><span style="text-align:right">${arrSched}</span>
+            ${hasDelay ? `
+            <span style="opacity:0.5;font-size:10px">${t('popups.flight.estimated') || 'Est'}</span><span></span><span style="opacity:0.5;font-size:10px;text-align:right">${t('popups.flight.estimated') || 'Est'}</span>
+            <span>${depEst}${fmtDelayMin(live.depDelayedMin)}</span><span style="opacity:0.3;text-align:center">\u2194</span><span style="text-align:right">${arrEst}${fmtDelayMin(live.arrDelayedMin)}</span>` : ''}
+          </div>`);
+
+        // Book this route CTA
+        const today = new Date();
+        const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+        const bookUrl = sanitizeUrl(`https://www.google.com/travel/flights/search?q=Flights+from+${encodeURIComponent(live.depIata)}+to+${encodeURIComponent(live.arrIata)}+on+${encodeURIComponent(todayStr)}`);
+        parts.push(`<a href="${bookUrl}" target="_blank" rel="noopener" style="display:block;margin-top:8px;padding:7px 12px;background:rgba(68,255,136,.06);border:1px solid rgba(68,255,136,.18);border-radius:6px;color:var(--green,#44ff88);text-decoration:none;font-size:12px;text-align:center">Book this route &rarr;</a>`);
+      }
+
+      // Enrichment stats row
+      const rows: string[] = [];
+      if (live.registration) rows.push(`<div class="popup-stat"><span class="stat-label">Reg</span><span class="stat-value">${escapeHtml(live.registration)}</span></div>`);
+      if (live.model) rows.push(`<div class="popup-stat"><span class="stat-label">Model</span><span class="stat-value">${escapeHtml(live.model)}</span></div>`);
+      if (live.operator) rows.push(`<div class="popup-stat"><span class="stat-label">Operator</span><span class="stat-value">${escapeHtml(live.operator)}</span></div>`);
+      if (live.verticalRate !== 0) rows.push(`<div class="popup-stat"><span class="stat-label">Climb</span><span class="stat-value">${live.verticalRate > 0 ? '+' : ''}${Math.round(live.verticalRate)} fpm</span></div>`);
+
+      if (parts.length === 0 && rows.length === 0 && !photoHtml) {
+        setTrustedHtml(section, trustedHtml('', "legacy direct innerHTML migration"));
+        return;
+      }
+
+      const statsHtml = rows.length > 0 ? `<div class="popup-stats">${rows.join('')}</div>` : '';
+      setTrustedHtml(section, trustedHtml(`
+        <div class="popup-section-label" style="font-size:10px;opacity:0.5;text-transform:uppercase;letter-spacing:.05em;margin-top:8px">Live Data</div>
+        ${parts.join('')}
+        ${statsHtml}
+        ${photoHtml}
+      `, "legacy direct innerHTML migration"));
+      // Clamp for text content immediately, then re-clamp once the photo is sized.
+      this.clampPopupToViewport();
+      if (photoHtml) {
+        const img = section.querySelector<HTMLImageElement>('img');
+        if (img && !img.complete) {
+          img.addEventListener('load', () => { this.clampPopupToViewport(); }, { once: true });
+          img.addEventListener('error', () => { this.clampPopupToViewport(); }, { once: true });
+        }
+      }
+    } catch {
+      if (section.isConnected) {
+        setTrustedHtml(section, trustedHtml('', "legacy direct innerHTML migration"));
       }
     }
   }
@@ -871,7 +1280,7 @@ export class MapPopup {
 
   private getTimeUntil(date: Date | string): string {
     const d = date instanceof Date ? date : new Date(date);
-    if (isNaN(d.getTime())) return '—';
+    if (Number.isNaN(d.getTime())) return '—';
     const ms = d.getTime() - Date.now();
     if (ms <= 0) return t('popups.expired');
     const hours = Math.floor(ms / (1000 * 60 * 60));
@@ -927,6 +1336,59 @@ export class MapPopup {
   }
 
   private renderWaterwayPopup(waterway: StrategicWaterway): string {
+    const cp = this.chokepointData?.chokepoints?.find(
+      c => c.id === waterway.chokepointId,
+    );
+    // Chart is lazy-loaded via GetChokepointHistory on popup mount. Render the
+    // section only when the chokepoint is known AND upstream flagged data
+    // available — a zero-state fill (partial portwatch) means the per-id
+    // history key is also empty, so there's nothing to fetch.
+    const hasChart = !!cp && cp.transitSummary?.dataAvailable !== false;
+    const isPro = hasPremiumAccess(getAuthState());
+    const sectors = CHOKEPOINT_HS2_SECTORS[waterway.chokepointId];
+
+    // Sector mix: only show the compact SVG ring for free users (PRO users get the full HS2RingChart below)
+    const sectorSection = (sectors && !isPro)
+      ? `<div class="popup-section-title" style="margin-top:10px;font-size:10px;text-transform:uppercase;opacity:.6;letter-spacing:.06em">Trade Sector Mix</div>
+         ${renderSectorRing(sectors)}`
+      : '';
+
+    // Transit chart is PRO-gated (real-time PortWatch data)
+    let chartSection = '';
+    if (hasChart) {
+      if (isPro) {
+        chartSection = `<div data-transit-chart="${escapeHtml(waterway.name)}" data-transit-chart-id="${escapeHtml(cp?.id ?? '')}" style="margin-top:10px;min-height:200px;display:flex;align-items:center;justify-content:center;color:var(--text-dim,#888);font-size:12px">${t('components.supplyChain.loadingHistory') || 'Loading transit history\u2026'}</div>`;
+      } else {
+        chartSection = `
+          <div class="sector-pro-gate" data-gate="chokepoint-transit-chart" style="position:relative;overflow:hidden;border-radius:6px;margin-top:10px;min-height:120px;background:var(--surface-elevated, #111)">
+            <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:4px">
+              <span style="font-size:16px">🔒</span>
+              <span style="font-size:10px;font-weight:600;opacity:.8">PRO</span>
+              <span style="font-size:9px;opacity:.5">Transit History</span>
+            </div>
+          </div>`;
+      }
+    }
+
+    // Sector exposure ring is PRO-gated (canvas donut with legend)
+    let ringSection = '';
+    if (sectors) {
+      if (isPro) {
+        ringSection = `
+          <div class="popup-section-title" style="margin-top:10px;font-size:10px;text-transform:uppercase;opacity:.6;letter-spacing:.06em">Sector Exposure</div>
+          <div data-hs2-ring="${escapeHtml(waterway.chokepointId)}" class="popup-hs2-ring-container"></div>`;
+      } else {
+        ringSection = `
+          <div class="sector-pro-gate" data-gate="chokepoint-sector-ring" style="position:relative;overflow:hidden;border-radius:6px;margin-top:10px;min-height:80px;background:var(--surface-elevated, #111)">
+            <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:4px">
+              <span style="font-size:16px">🔒</span>
+              <span style="font-size:10px;font-weight:600;opacity:.8">PRO</span>
+              <span style="font-size:9px;opacity:.5">Sector Breakdown</span>
+            </div>
+          </div>`;
+      }
+    }
+
     return `
       <div class="popup-header waterway">
         <span class="popup-title">${escapeHtml(waterway.name)}</span>
@@ -941,6 +1403,9 @@ export class MapPopup {
             <span class="stat-value">${waterway.lat.toFixed(2)}°, ${waterway.lon.toFixed(2)}°</span>
           </div>
         </div>
+        ${sectorSection}
+        ${ringSection}
+        ${chartSection}
       </div>
     `;
   }
@@ -999,6 +1464,7 @@ export class MapPopup {
     const actorsSection = event.actors?.length
       ? `<div class="popup-stat"><span class="stat-label">${t('popups.actors')}</span><span class="stat-value">${event.actors.map(a => escapeHtml(a)).join(', ')}</span></div>`
       : '';
+    const sourceLinks = renderPopupSourceLinks(event.sourceUrls, { label: t('popups.source') });
     const tagsSection = event.tags?.length
       ? `<div class="popup-tags">${event.tags.map(t => `<span class="popup-tag">${escapeHtml(t)}</span>`).join('')}</div>`
       : '';
@@ -1029,6 +1495,7 @@ export class MapPopup {
           ${actorsSection}
         </div>
         ${event.title ? `<p class="popup-description">${escapeHtml(event.title)}</p>` : ''}
+        ${sourceLinks}
         ${tagsSection}
         ${relatedHotspots}
       </div>
@@ -1056,7 +1523,11 @@ export class MapPopup {
       const dateStr = event.time.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
       const city = event.city ? escapeHtml(event.city) : '';
       const title = event.title ? `: ${escapeHtml(event.title.slice(0, 40))}${event.title.length > 40 ? '...' : ''}` : '';
-      return `<li class="cluster-item ${sevClass}">${icon} ${dateStr}${city ? ` • ${city}` : ''}${title}</li>`;
+      const sourceUrl = event.sourceUrls?.find(url => sanitizeUrl(url));
+      const sourceLink = sourceUrl
+        ? ` <a class="popup-link cluster-source-link" href="${sanitizeUrl(sourceUrl)}" target="_blank" rel="noopener noreferrer nofollow">${t('popups.source')} →</a>`
+        : '';
+      return `<li class="cluster-item ${sevClass}">${icon} ${dateStr}${city ? ` • ${city}` : ''}${title}${sourceLink}</li>`;
     }).join('');
 
     const renderedCount = Math.min(10, data.items.length);
@@ -1085,7 +1556,11 @@ export class MapPopup {
 
   private renderFlightPopup(delay: AirportDelayAlert): string {
     const severityClass = escapeHtml(delay.severity);
-    const severityLabel = escapeHtml(delay.severity.toUpperCase());
+    // #3707: render 'unknown' as a neutral "No data" badge so users don't
+    // read it as "healthy / normal". All other severities keep raw label.
+    const severityLabel = delay.severity === 'unknown'
+      ? 'NO DATA'
+      : escapeHtml(delay.severity.toUpperCase());
     const delayTypeLabels: Record<string, string> = {
       'ground_stop': t('popups.flight.groundStop'),
       'ground_delay': t('popups.flight.groundDelay'),
@@ -1094,14 +1569,23 @@ export class MapPopup {
       'general': t('popups.flight.delaysReported'),
       'closure': t('popups.flight.closure'),
     };
-    const delayTypeLabel = delayTypeLabels[delay.delayType] || t('popups.flight.delays');
-    const icon = delay.delayType === 'closure' ? '🚫' : delay.delayType === 'ground_stop' ? '🛑' : delay.severity === 'severe' ? '✈️' : '🛫';
+    // #3707: when severity is 'unknown' we have no delay-type signal either.
+    const delayTypeLabel = delay.severity === 'unknown'
+      ? 'Coverage unavailable'
+      : (delayTypeLabels[delay.delayType] || t('popups.flight.delays'));
+    const icon = delay.severity === 'unknown'
+      ? '❔'
+      : delay.delayType === 'closure' ? '🚫'
+      : delay.delayType === 'ground_stop' ? '🛑'
+      : delay.severity === 'severe' ? '✈️'
+      : '🛫';
     const sourceLabels: Record<string, string> = {
       'faa': t('popups.flight.sources.faa'),
       'eurocontrol': t('popups.flight.sources.eurocontrol'),
       'computed': t('popups.flight.sources.computed'),
       'aviationstack': t('popups.flight.sources.aviationstack'),
       'notam': t('popups.flight.sources.notam'),
+      'unspecified': '—',
     };
     const sourceLabel = sourceLabels[delay.source] || escapeHtml(delay.source);
     const regionLabels: Record<string, string> = {
@@ -1188,37 +1672,50 @@ export class MapPopup {
           </div>
           <div class="popup-stat">
             <span class="stat-label">${t('popups.source')}</span>
-            <span class="stat-value">${escapeHtml(pos.source)}</span>
+            <span class="stat-value">${formatPositionSource(pos.source)}</span>
           </div>
           <div class="popup-stat">
             <span class="stat-label">${t('popups.updated')}</span>
             <span class="stat-value">${pos.observedAt.toLocaleTimeString()}</span>
           </div>
         </div>
+${isFeatureAvailable('wingbitsEnrichment') ? '<div class="wingbits-live-section"><div class="wingbits-live-loading" style="font-size:11px;opacity:0.5;padding:4px 0">Loading Wingbits live data…</div></div>' : ''}
       </div>
     `;
   }
 
   private renderAPTPopup(apt: APTGroup): string {
+    const tacticsHtml = apt.tactics?.length
+      ? `<div class="popup-tags">${apt.tactics.map(tactic => `<span class="popup-tag">${escapeHtml(tactic)}</span>`).join('')}</div>`
+      : '';
+    const sectorsHtml = apt.targetSectors?.length
+      ? `<div class="popup-subtitle" style="margin-top:6px">Targets: ${escapeHtml(apt.targetSectors.join(', '))}</div>`
+      : '';
+    const mitreHtml = apt.mitreId && apt.mitreUrl
+      ? `<div class="popup-stat"><span class="stat-label">MITRE</span><span class="stat-value"><a class="popup-link" href="${escapeHtml(apt.mitreUrl)}" target="_blank" rel="noopener">${escapeHtml(apt.mitreId)} ↗</a></span></div>`
+      : '';
+    const activeBadge = apt.active === false
+      ? `<span class="popup-badge low">Inactive</span>`
+      : `<span class="popup-badge high">${t('popups.threat')}</span>`;
+
     return `
       <div class="popup-header apt">
         <span class="popup-title">${escapeHtml(apt.name)}</span>
-        <span class="popup-badge high">${t('popups.threat')}</span>
+        ${activeBadge}
         <button class="popup-close" aria-label="Close">×</button>
       </div>
       <div class="popup-body">
-        <div class="popup-subtitle">${t('popups.aka')}: ${escapeHtml(apt.aka)}</div>
+        <div class="popup-subtitle">${escapeHtml(apt.aka)}</div>
         <div class="popup-stats">
           <div class="popup-stat">
             <span class="stat-label">${t('popups.sponsor')}</span>
             <span class="stat-value">${escapeHtml(apt.sponsor)}</span>
           </div>
-          <div class="popup-stat">
-            <span class="stat-label">${t('popups.origin')}</span>
-            <span class="stat-value">${apt.lat.toFixed(1)}°, ${apt.lon.toFixed(1)}°</span>
-          </div>
+          ${mitreHtml}
         </div>
-        <p class="popup-description">${t('popups.apt.description')}</p>
+        ${apt.description ? `<p class="popup-description">${escapeHtml(apt.description)}</p>` : ''}
+        ${tacticsHtml}
+        ${sectorsHtml}
       </div>
     `;
   }
@@ -1281,6 +1778,8 @@ export class MapPopup {
       'enrichment': t('popups.nuclear.types.enrichment'),
       'weapons': t('popups.nuclear.types.weapons'),
       'research': t('popups.nuclear.types.research'),
+      'reprocessing': t('popups.nuclear.types.reprocessing'),
+      'test-site': t('popups.nuclear.types.testSite'),
     };
     const statusColors: Record<string, string> = {
       'active': 'elevated',
@@ -1687,7 +2186,7 @@ export class MapPopup {
             </div>
           </div>
         ` : ''}
-        <p class="popup-description">${escapeHtml(outage.description.slice(0, 250))}${outage.description.length > 250 ? '...' : ''}</p>
+        ${outage.description ? `<p class="popup-description">${escapeHtml(outage.description.slice(0, 250))}${outage.description.length > 250 ? '...' : ''}</p>` : ''}
         <a href="${sanitizeUrl(outage.link)}" target="_blank" class="popup-link">${t('popups.outage.readReport')} →</a>
       </div>
     `;
@@ -2104,6 +2603,20 @@ export class MapPopup {
     const aircraftType = escapeHtml(typeLabels[flight.aircraftType] || flight.aircraftType);
     const squawk = flight.squawk ? escapeHtml(flight.squawk) : '';
     const note = flight.note ? escapeHtml(flight.note) : '';
+    const registration = flight.registration ? escapeHtml(flight.registration) : '';
+    const aircraftModel = flight.aircraftModel ? escapeHtml(flight.aircraftModel) : '';
+
+    const climbRateStat = flight.verticalRate !== undefined && flight.verticalRate !== 0 ? `
+          <div class="popup-stat">
+            <span class="stat-label">${t('popups.militaryFlight.climbRate')}</span>
+            <span class="stat-value">${flight.verticalRate > 0 ? '+' : ''}${Math.round(flight.verticalRate)} fpm</span>
+          </div>` : '';
+
+    const enrichedStats = flight.enriched ? [
+      flight.enriched.manufacturer ? `<div class="popup-stat"><span class="stat-label">${t('popups.militaryFlight.manufacturer')}</span><span class="stat-value">${escapeHtml(flight.enriched.manufacturer)}</span></div>` : '',
+      flight.enriched.owner ? `<div class="popup-stat"><span class="stat-label">${t('popups.militaryFlight.owner')}</span><span class="stat-value">${escapeHtml(flight.enriched.owner)}</span></div>` : '',
+      flight.enriched.builtYear ? `<div class="popup-stat"><span class="stat-label">${t('popups.militaryFlight.builtYear')}</span><span class="stat-value">${escapeHtml(flight.enriched.builtYear)}</span></div>` : '',
+    ].join('') : '';
 
     return `
       <div class="popup-header military-flight ${flight.operator}">
@@ -2113,6 +2626,7 @@ export class MapPopup {
       </div>
       <div class="popup-body">
         <div class="popup-subtitle">${operatorLabel}</div>
+        ${registration || aircraftModel ? `<div class="popup-subtitle" style="opacity:0.7;font-size:11px;margin-top:-4px">${[registration, aircraftModel].filter(Boolean).join(' · ')}</div>` : ''}
         <div class="popup-stats">
           <div class="popup-stat">
             <span class="stat-label">${t('popups.militaryFlight.altitude')}</span>
@@ -2126,6 +2640,7 @@ export class MapPopup {
             <span class="stat-label">${t('popups.militaryFlight.heading')}</span>
             <span class="stat-value">${Math.round(flight.heading)}°</span>
           </div>
+          ${climbRateStat}
           <div class="popup-stat">
             <span class="stat-label">${t('popups.militaryFlight.hexCode')}</span>
             <span class="stat-value">${hexCode}</span>
@@ -2140,11 +2655,56 @@ export class MapPopup {
             <span class="stat-value">${squawk}</span>
           </div>
           ` : ''}
+          ${enrichedStats}
         </div>
         ${flight.note ? `<p class="popup-description">${note}</p>` : ''}
+${isFeatureAvailable('wingbitsEnrichment') ? '<div class="wingbits-live-section"><div class="wingbits-live-loading" style="font-size:11px;opacity:0.5;padding:4px 0">Loading Wingbits live data…</div></div>' : ''}
         <div class="popup-attribution">${t('popups.militaryFlight.attribution')}</div>
       </div>
     `;
+  }
+
+  private getFlagEmoji(countryCode: string): string {
+    if (!countryCode || countryCode.length !== 2) return '';
+    const codePoints = countryCode
+      .toUpperCase()
+      .split('')
+      .map(char => 127397 + char.charCodeAt(0));
+    try {
+      return String.fromCodePoint(...codePoints);
+    } catch {
+      return '';
+    }
+  }
+
+  private static readonly OPERATOR_COUNTRY_MAP: Record<string, string> = {
+    usn: 'US', usaf: 'US', usmc: 'US', usa: 'US', uscg: 'US',
+    rn: 'GB', raf: 'GB',
+    plan: 'CN', plaaf: 'CN',
+    vks: 'RU', ruf: 'RU',
+    faf: 'FR', fn: 'FR',
+    gaf: 'DE',
+    iaf: 'IL',
+    jmsdf: 'JP',
+    rokn: 'KR',
+  };
+
+  private getOperatorCountryCode(vessel: { operator: string; operatorCountry?: string }): string {
+    return (vessel.operatorCountry ? nameToCountryCode(vessel.operatorCountry) : null)
+      || MapPopup.OPERATOR_COUNTRY_MAP[vessel.operator]
+      || '';
+  }
+
+  private formatCoord(lat: number, lon: number): string {
+    const ns = lat >= 0 ? 'N' : 'S';
+    const ew = lon >= 0 ? 'E' : 'W';
+    return `${Math.abs(lat).toFixed(3)}°${ns}, ${Math.abs(lon).toFixed(3)}°${ew}`;
+  }
+
+  private renderClusterVesselItem(v: MilitaryVessel): string {
+    const code = this.getOperatorCountryCode(v);
+    const flag = code ? this.getFlagEmoji(code) : '';
+    return `<div class="cluster-vessel-item">${flag ? `<span class="flag-icon-small">${flag}</span> ` : ''}${escapeHtml(v.name)} - ${escapeHtml(v.vesselType)}</div>`;
   }
 
   private renderMilitaryVesselPopup(vessel: MilitaryVessel): string {
@@ -2177,6 +2737,10 @@ export class MapPopup {
       ? `<span class="popup-badge high">${t('popups.militaryVessel.aisDark')}</span>`
       : '';
 
+    const dataSourceBadge = vessel.usniSource
+      ? `<span class="popup-badge" style="background:rgba(255,170,50,0.15);border:1px solid rgba(255,170,50,0.5);color:#ffaa44;">${t('popups.militaryVessel.estPosition')}</span>`
+      : `<span class="popup-badge" style="background:rgba(68,255,136,0.15);border:1px solid rgba(68,255,136,0.5);color:#44ff88;">${t('popups.militaryVessel.aisLive')}</span>`;
+
     // USNI deployment status badge
     const deploymentBadge = vessel.usniDeploymentStatus && vessel.usniDeploymentStatus !== 'unknown'
       ? `<span class="popup-badge ${vessel.usniDeploymentStatus === 'deployed' ? 'high' : vessel.usniDeploymentStatus === 'underway' ? 'elevated' : 'low'}">${vessel.usniDeploymentStatus.toUpperCase().replace('-', ' ')}</span>`
@@ -2197,33 +2761,75 @@ export class MapPopup {
     const vesselHull = vessel.hullNumber ? escapeHtml(vessel.hullNumber) : '';
     const vesselNote = vessel.note ? escapeHtml(vessel.note) : '';
 
+    const countryCode = this.getOperatorCountryCode(vessel);
+    const flagEmoji = countryCode ? this.getFlagEmoji(countryCode) : '';
+
+    const lastSeenStr = vessel.lastAisUpdate
+      ? `${new Date(vessel.lastAisUpdate).toLocaleString()}${vessel.aisGapMinutes ? ` (${vessel.aisGapMinutes}m ago)` : ''}`
+      : t('popups.unknown');
+
+    const recentTrack = vessel.track && vessel.track.length > 0
+      ? `<div class="popup-section">
+          <details>
+            <summary>${t('popups.militaryVessel.recentTracking')}</summary>
+            <div class="popup-section-content">
+              <div class="vessel-history-list">
+                ${vessel.track.slice(-5).reverse().map((tp, i) => `
+                  <div class="vessel-history-item">
+                    <span class="history-point">${this.formatCoord(tp[0], tp[1])}</span>
+                    ${i === 0 ? `<span class="history-tag">${t('popups.militaryVessel.lastReport')}</span>` : ''}
+                  </div>
+                `).join('')}
+              </div>
+            </div>
+          </details>
+        </div>`
+      : '';
+
+    const usniIntel = (vessel.usniActivityDescription || vessel.usniRegion || vessel.usniStrikeGroup) ? `
+      <div class="popup-section usni-intel-section">
+        <div class="section-header usni">
+          <span class="section-label">${t('popups.militaryVessel.usniIntel')}</span>
+        </div>
+        <div class="usni-intel-content">
+          ${vessel.usniStrikeGroup ? `<div class="usni-field"><strong>${t('popups.militaryVessel.strikeGroup')}:</strong> ${escapeHtml(vessel.usniStrikeGroup)}</div>` : ''}
+          ${vessel.usniRegion ? `<div class="usni-field"><strong>${t('popups.militaryVessel.region')}:</strong> ${escapeHtml(vessel.usniRegion)}</div>` : ''}
+          ${vessel.usniActivityDescription ? `<p class="usni-description">${escapeHtml(vessel.usniActivityDescription)}</p>` : ''}
+          ${vessel.usniArticleUrl && sanitizeUrl(vessel.usniArticleUrl) ? `
+            <div class="usni-source-row">
+              <a href="${sanitizeUrl(vessel.usniArticleUrl)}" target="_blank" rel="noopener noreferrer" class="usni-link">
+                ${t('popups.militaryVessel.usniSource')} ${vessel.usniArticleDate ? `(${new Date(vessel.usniArticleDate).toLocaleDateString()})` : ''}
+              </a>
+            </div>
+          ` : ''}
+        </div>
+      </div>
+    ` : '';
+
     return `
       <div class="popup-header military-vessel ${vessel.operator}">
-        <span class="popup-title">${vesselName}</span>
-        ${darkWarning}
-        ${deploymentBadge}
-        <span class="popup-badge elevated">${vesselBadgeType}</span>
+        <div class="popup-title-row">
+          <span class="popup-title">${vesselName}</span>
+          ${vessel.hullNumber ? `<span class="hull-badge">${vesselHull}</span>` : ''}
+        </div>
+        <div class="popup-badges">
+          ${darkWarning}
+          ${dataSourceBadge}
+          ${deploymentBadge}
+          <span class="popup-badge elevated">${vesselBadgeType}</span>
+        </div>
         <button class="popup-close" aria-label="Close">×</button>
       </div>
       <div class="popup-body">
-        <div class="popup-subtitle">${vesselOperator}</div>
+        <div class="popup-subtitle">
+          ${flagEmoji ? `<span class="flag-icon">${flagEmoji}</span>` : ''}
+          <span class="operator-label">${vesselOperator}</span>
+        </div>
         <div class="popup-stats">
           <div class="popup-stat">
             <span class="stat-label">${t('popups.type')}</span>
             <span class="stat-value">${vesselTypeLabel}</span>
           </div>
-          ${vessel.usniRegion ? `
-          <div class="popup-stat">
-            <span class="stat-label">${t('popups.militaryVessel.region')}</span>
-            <span class="stat-value">${escapeHtml(vessel.usniRegion)}</span>
-          </div>
-          ` : ''}
-          ${vessel.usniStrikeGroup ? `
-          <div class="popup-stat">
-            <span class="stat-label">${t('popups.militaryVessel.strikeGroup')}</span>
-            <span class="stat-value">${escapeHtml(vessel.usniStrikeGroup)}</span>
-          </div>
-          ` : ''}
           <div class="popup-stat">
             <span class="stat-label">${t('popups.militaryVessel.speed')}</span>
             <span class="stat-value">${vessel.speed} kts</span>
@@ -2238,18 +2844,31 @@ export class MapPopup {
             <span class="stat-value">${vesselMmsi}</span>
           </div>
           ` : ''}
-          ${vessel.hullNumber ? `
-          <div class="popup-stat">
-            <span class="stat-label">${t('popups.militaryVessel.hull')}</span>
-            <span class="stat-value">${vesselHull}</span>
+          ${vessel.nearChokepoint ? `
+          <div class="popup-stat warning">
+            <span class="stat-label">${t('popups.militaryVessel.nearChokepoint')}</span>
+            <span class="stat-value">${escapeHtml(vessel.nearChokepoint)}</span>
           </div>
           ` : ''}
+          ${vessel.nearBase ? `
+          <div class="popup-stat">
+            <span class="stat-label">${t('popups.militaryVessel.nearBase')}</span>
+            <span class="stat-value">${escapeHtml(vessel.nearBase)}</span>
+          </div>
+          ` : ''}
+          <div class="popup-stat full-width">
+            <span class="stat-label">${t('popups.militaryVessel.lastSeen')}</span>
+            <span class="stat-value">${lastSeenStr}</span>
+          </div>
         </div>
-        ${vessel.usniActivityDescription ? `<p class="popup-description"><strong>${t('popups.militaryVessel.usniIntel')}:</strong> ${escapeHtml(vessel.usniActivityDescription)}</p>` : ''}
+
+        ${usniIntel}
+        ${recentTrack}
+
         ${vessel.note ? `<p class="popup-description">${vesselNote}</p>` : ''}
         ${vessel.isDark ? `<p class="popup-description alert">${t('popups.militaryVessel.darkDescription')}</p>` : ''}
         ${vessel.usniSource ? `<p class="popup-description" style="opacity:0.7;font-size:0.85em">${t('popups.militaryVessel.approximatePosition')}</p>` : ''}
-        ${vessel.usniArticleUrl ? `<div class="popup-attribution"><a href="${escapeHtml(vessel.usniArticleUrl)}" target="_blank" rel="noopener">${t('popups.militaryVessel.usniSource')}${vessel.usniArticleDate ? ` (${new Date(vessel.usniArticleDate).toLocaleDateString()})` : ''}</a></div>` : ''}
+        ${vessel.usniArticleUrl && !usniIntel && sanitizeUrl(vessel.usniArticleUrl) ? `<div class="popup-attribution"><a href="${sanitizeUrl(vessel.usniArticleUrl)}" target="_blank" rel="noopener noreferrer">${t('popups.militaryVessel.usniSource')}${vessel.usniArticleDate ? ` (${new Date(vessel.usniArticleDate).toLocaleDateString()})` : ''}</a></div>` : ''}
       </div>
     `;
   }
@@ -2335,14 +2954,21 @@ export class MapPopup {
     const clusterName = escapeHtml(cluster.name);
     const activityTypeLabel = escapeHtml(activityType.toUpperCase());
     const region = cluster.region ? escapeHtml(cluster.region) : '';
+
+    const opCounts: Record<string, number> = {};
+    cluster.vessels.forEach(v => { opCounts[v.operator] = (opCounts[v.operator] || 0) + 1; });
+    const dominantOp = Object.entries(opCounts).sort((a, b) => b[1] - a[1])[0]?.[0];
+    const dominantCode = dominantOp ? (MapPopup.OPERATOR_COUNTRY_MAP[dominantOp] || '') : '';
+    const dominantFlag = dominantCode ? this.getFlagEmoji(dominantCode) : '';
+
     const visibleVessels = cluster.vessels
       .slice(0, 5)
-      .map(v => `<div class="cluster-vessel-item">${escapeHtml(v.name)} - ${escapeHtml(v.vesselType)}</div>`)
+      .map(v => this.renderClusterVesselItem(v))
       .join('');
     const hiddenVessels = cluster.vessels.length > 5
       ? cluster.vessels
           .slice(5)
-          .map(v => `<div class="cluster-vessel-item">${escapeHtml(v.name)} - ${escapeHtml(v.vesselType)}</div>`)
+          .map(v => this.renderClusterVesselItem(v))
           .join('')
       : '';
     const hiddenCount = cluster.vessels.length - 5;
@@ -2360,7 +2986,7 @@ export class MapPopup {
         <button class="popup-close" aria-label="Close">×</button>
       </div>
       <div class="popup-body">
-        <div class="popup-subtitle">${activityLabels[activityType] || t('popups.militaryCluster.vesselActivity.unknown')}</div>
+        <div class="popup-subtitle">${dominantFlag ? `<span class="flag-icon">${dominantFlag}</span> ` : ''}${activityLabels[activityType] || t('popups.militaryCluster.vesselActivity.unknown')}</div>
         <div class="popup-stats">
           <div class="popup-stat">
             <span class="stat-label">${t('popups.militaryCluster.vessels')}</span>
@@ -2814,5 +3440,21 @@ export class MapPopup {
         </div>
       </div>
     `;
+  }
+}
+
+function formatRadiationSources(observation: RadiationObservation): string {
+  const uniqueSources = [...new Set(observation.contributingSources)];
+  return uniqueSources.length > 0 ? uniqueSources.join(' + ') : observation.source;
+}
+
+function formatRadiationConfidence(confidence: RadiationObservation['confidence']): string {
+  switch (confidence) {
+    case 'high':
+      return 'High';
+    case 'medium':
+      return 'Medium';
+    default:
+      return 'Low';
   }
 }

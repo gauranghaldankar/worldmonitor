@@ -1,14 +1,16 @@
 import { Panel } from './Panel';
-import { IDLE_PAUSE_MS } from '@/config';
+import { IDLE_PAUSE_MS, STORAGE_KEYS } from '@/config';
 import { isDesktopRuntime, getLocalApiPort } from '@/services/runtime';
 import { escapeHtml } from '@/utils/sanitize';
 import { t } from '../services/i18n';
-import { trackWebcamSelected, trackWebcamRegionFiltered } from '@/services/analytics';
+import { track, trackWebcamSelected, trackWebcamRegionFiltered } from '@/services/analytics';
 import { getStreamQuality, subscribeStreamQualityChange } from '@/services/ai-flow-settings';
-import { isMobileDevice } from '@/utils';
+import { isMobileDevice, loadFromStorage, saveToStorage } from '@/utils';
 import { getLiveStreamsAlwaysOn, subscribeLiveStreamsSettingsChange } from '@/services/live-stream-settings';
+import { setTrustedHtml, trustedHtml } from '@/utils/dom-utils';
 
-type WebcamRegion = 'iran' | 'middle-east' | 'europe' | 'asia' | 'americas' | 'space';
+
+type WebcamRegion = 'middle-east' | 'europe' | 'asia' | 'americas' | 'space';
 
 interface WebcamFeed {
   id: string;
@@ -22,16 +24,11 @@ interface WebcamFeed {
 // Verified YouTube live stream IDs — validated Feb 2026 via title cross-check.
 // IDs may rotate; update when stale.
 const WEBCAM_FEEDS: WebcamFeed[] = [
-  // Iran Attacks — Tehran, Tel Aviv, Jerusalem
-  { id: 'iran-tehran', city: 'Tehran', country: 'Iran', region: 'iran', channelHandle: '@IranHDCams', fallbackVideoId: '-zGuR1qVKrU' },
-  { id: 'iran-telaviv', city: 'Tel Aviv', country: 'Israel', region: 'iran', channelHandle: '@IsraelLiveCam', fallbackVideoId: 'gmtlJ_m2r5A' },
-  { id: 'iran-jerusalem', city: 'Jerusalem', country: 'Israel', region: 'iran', channelHandle: '@JerusalemLive', fallbackVideoId: 'fIurYTprwzg' },
-  { id: 'iran-multicam', city: 'Middle East', country: 'Multi', region: 'iran', channelHandle: '@MiddleEastCams', fallbackVideoId: '4E-iFtUM2kk' },
   // Middle East — Jerusalem & Tehran adjacent (conflict hotspots)
-  { id: 'jerusalem', city: 'Jerusalem', country: 'Israel', region: 'middle-east', channelHandle: '@TheWesternWall', fallbackVideoId: 'UyduhBUpO7Q' },
-  { id: 'tehran', city: 'Tehran', country: 'Iran', region: 'middle-east', channelHandle: '@IranHDCams', fallbackVideoId: '-zGuR1qVKrU' },
+  { id: 'jerusalem', city: 'Jerusalem', country: 'Israel', region: 'middle-east', channelHandle: '@TheWesternWall', fallbackVideoId: 'e34xb-Fbl0U' },
+  { id: 'middle-east', city: 'Middle East', country: 'Multi', region: 'middle-east', channelHandle: '@MiddleEastCams', fallbackVideoId: 'oxT5R6I0N6E' },
   { id: 'tel-aviv', city: 'Tel Aviv', country: 'Israel', region: 'middle-east', channelHandle: '@IsraelLiveCam', fallbackVideoId: 'gmtlJ_m2r5A' },
-  { id: 'mecca', city: 'Mecca', country: 'Saudi Arabia', region: 'middle-east', channelHandle: '@MakkahLive', fallbackVideoId: 'Cm1v4bteXbI' },
+  { id: 'mecca', city: 'Mecca', country: 'Saudi Arabia', region: 'middle-east', channelHandle: '@MakkahLive', fallbackVideoId: 'kJwEsQTegxk' },
   { id: 'beirut-mtv', city: 'Beirut', country: 'Lebanon', region: 'middle-east', channelHandle: '@MTVLebanonNews', fallbackVideoId: 'djF-Lkgfp6k' },
   // Europe
   { id: 'kyiv', city: 'Kyiv', country: 'Ukraine', region: 'europe', channelHandle: '@DWNews', fallbackVideoId: '-Q7FuPINDjA' },
@@ -47,14 +44,14 @@ const WEBCAM_FEEDS: WebcamFeed[] = [
   // Asia-Pacific — Taipei first (strait hotspot), then Shanghai, Tokyo, Seoul
   { id: 'taipei', city: 'Taipei', country: 'Taiwan', region: 'asia', channelHandle: '@JackyWuTaipei', fallbackVideoId: 'z_fY1pj1VBw' },
   { id: 'shanghai', city: 'Shanghai', country: 'China', region: 'asia', channelHandle: '@SkylineWebcams', fallbackVideoId: '76EwqI5XZIc' },
-  { id: 'tokyo', city: 'Tokyo', country: 'Japan', region: 'asia', channelHandle: '@TokyoLiveCam4K', fallbackVideoId: '4pu9sF5Qssw' },
+  { id: 'tokyo', city: 'Tokyo', country: 'Japan', region: 'asia', channelHandle: '@TokyoLiveCam4K', fallbackVideoId: '_k-5U7IeK8g' },
   { id: 'seoul', city: 'Seoul', country: 'South Korea', region: 'asia', channelHandle: '@UNvillage_live', fallbackVideoId: '-JhoMGoAfFc' },
   { id: 'sydney', city: 'Sydney', country: 'Australia', region: 'asia', channelHandle: '@WebcamSydney', fallbackVideoId: '7pcL-0Wo77U' },
   // Space
   { id: 'iss-earth', city: 'ISS Earth View', country: 'Space', region: 'space', channelHandle: '@NASA', fallbackVideoId: 'vytmBNhc9ig' },
   { id: 'nasa-live', city: 'NASA TV', country: 'Space', region: 'space', channelHandle: '@NASA', fallbackVideoId: 'zPH5KtjJFaQ' },
   { id: 'space-x', city: 'SpaceX', country: 'Space', region: 'space', channelHandle: '@SpaceX', fallbackVideoId: 'fO9e9jnhYK8' },
-  { id: 'space-walk', city: 'Space Walk', country: 'Space', region: 'space', channelHandle: '@NASA', fallbackVideoId: '0FBiyFpV__g' },
+  { id: 'space-walk', city: 'Space', country: 'Space', region: 'space', channelHandle: '@NASA', fallbackVideoId: 'fO9e9jnhYK8' },
 ];
 
 const MAX_GRID_CELLS = 4;
@@ -66,6 +63,31 @@ const IDLE_ACTIVITY_EVENTS = ['mousedown', 'keydown', 'scroll', 'touchstart', 'm
 type ViewMode = 'grid' | 'single';
 type RegionFilter = 'all' | WebcamRegion;
 
+const ALL_REGIONS: RegionFilter[] = ['all', 'middle-east', 'europe', 'americas', 'asia', 'space'];
+
+interface WebcamPrefs {
+  regionFilter: RegionFilter;
+  viewMode: ViewMode;
+  activeFeedId: string;
+}
+
+function loadWebcamPrefs(forceSingleView: boolean): WebcamPrefs {
+  const stored = loadFromStorage<Partial<WebcamPrefs>>(STORAGE_KEYS.webcamPrefs, {});
+  const region = stored.regionFilter as RegionFilter;
+  const regionFilter = ALL_REGIONS.includes(region) ? region : 'all';
+  const viewMode = forceSingleView ? 'single'
+    : (stored.viewMode === 'grid' || stored.viewMode === 'single' ? stored.viewMode : 'grid');
+  const regionFeeds = regionFilter === 'all' ? WEBCAM_FEEDS
+    : WEBCAM_FEEDS.filter(f => f.region === regionFilter);
+  const matchedFeed = regionFeeds.find(f => f.id === stored.activeFeedId);
+  const activeFeedId = matchedFeed?.id ?? regionFeeds[0]?.id ?? WEBCAM_FEEDS[0]!.id;
+  return { regionFilter, viewMode, activeFeedId };
+}
+
+function saveWebcamPrefs(prefs: WebcamPrefs): void {
+  saveToStorage(STORAGE_KEYS.webcamPrefs, prefs);
+}
+
 interface WebcamIframeTracker {
   feed: WebcamFeed;
   container: HTMLElement;
@@ -75,7 +97,7 @@ interface WebcamIframeTracker {
 
 export class LiveWebcamsPanel extends Panel {
   private viewMode: ViewMode = 'grid';
-  private regionFilter: RegionFilter = 'iran';
+  private regionFilter: RegionFilter = 'all';
   private activeFeed: WebcamFeed = WEBCAM_FEEDS[0]!;
   private toolbar: HTMLElement | null = null;
   private iframes: HTMLIFrameElement[] = [];
@@ -99,13 +121,14 @@ export class LiveWebcamsPanel extends Panel {
   private boundEmbedMessageHandler: (e: MessageEvent) => void;
 
   constructor() {
-    super({ id: 'live-webcams', title: t('panels.liveWebcams'), className: 'panel-wide', closable: false });
+    super({ id: 'live-webcams', title: t('panels.liveWebcams'), className: 'panel-wide', closable: true, collapsible: true, infoTooltip: t('components.liveWebcams.infoTooltip') });
     this.insertLiveCountBadge(WEBCAM_FEEDS.length);
 
-    // Mobile: force single-cam view. 4 iframes at once is a battery + performance disaster.
-    if (this.forceSingleView) {
-      this.viewMode = 'single';
-    }
+    const prefs = loadWebcamPrefs(this.forceSingleView);
+    this.regionFilter = prefs.regionFilter;
+    this.viewMode = prefs.viewMode;
+    this.activeFeed = WEBCAM_FEEDS.find(f => f.id === prefs.activeFeedId) ?? WEBCAM_FEEDS[0]!;
+
     this.createFullscreenButton();
     this.createToolbar();
     this.setupIntersectionObserver();
@@ -125,9 +148,10 @@ export class LiveWebcamsPanel extends Panel {
     this.fullscreenBtn = document.createElement('button');
     this.fullscreenBtn.className = 'live-mute-btn';
     this.fullscreenBtn.title = 'Fullscreen';
-    this.fullscreenBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>';
+    setTrustedHtml(this.fullscreenBtn, trustedHtml('<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>', "legacy direct innerHTML migration"));
     this.fullscreenBtn.addEventListener('click', (e) => {
       e.stopPropagation();
+      track('webcam-fullscreen', { entering: !this.isFullscreen });
       this.toggleFullscreen();
     });
     const header = this.element.querySelector('.panel-header');
@@ -140,9 +164,9 @@ export class LiveWebcamsPanel extends Panel {
     document.body.classList.toggle('live-news-fullscreen-active', this.isFullscreen);
     if (this.fullscreenBtn) {
       this.fullscreenBtn.title = this.isFullscreen ? 'Exit fullscreen' : 'Fullscreen';
-      this.fullscreenBtn.innerHTML = this.isFullscreen
+      setTrustedHtml(this.fullscreenBtn, trustedHtml(this.isFullscreen
         ? '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 14h6v6"/><path d="M20 10h-6V4"/><path d="M14 10l7-7"/><path d="M3 21l7-7"/></svg>'
-        : '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>';
+        : '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>', "legacy direct innerHTML migration"));
     }
   }
 
@@ -150,12 +174,20 @@ export class LiveWebcamsPanel extends Panel {
     if (e.key === 'Escape' && this.isFullscreen) this.toggleFullscreen();
   };
 
+  private savePrefs(): void {
+    saveWebcamPrefs({
+      regionFilter: this.regionFilter,
+      viewMode: this.viewMode,
+      activeFeedId: this.activeFeed.id,
+    });
+  }
+
   private get filteredFeeds(): WebcamFeed[] {
     if (this.regionFilter === 'all') return WEBCAM_FEEDS;
     return WEBCAM_FEEDS.filter(f => f.region === this.regionFilter);
   }
 
-  private static readonly ALL_GRID_IDS = ['jerusalem', 'tehran', 'kyiv', 'washington'];
+  private static readonly ALL_GRID_IDS = ['jerusalem', 'middle-east', 'kyiv', 'washington'];
 
   private get gridFeeds(): WebcamFeed[] {
     if (this.regionFilter === 'all') {
@@ -174,7 +206,6 @@ export class LiveWebcamsPanel extends Panel {
     regionGroup.className = 'webcam-toolbar-group';
 
     const regions: { key: RegionFilter; label: string }[] = [
-      { key: 'iran', label: t('components.webcams.regions.iran') },
       { key: 'all', label: t('components.webcams.regions.all') },
       { key: 'middle-east', label: t('components.webcams.regions.mideast') },
       { key: 'europe', label: t('components.webcams.regions.europe') },
@@ -198,14 +229,14 @@ export class LiveWebcamsPanel extends Panel {
     const gridBtn = document.createElement('button');
     gridBtn.className = `webcam-view-btn${this.viewMode === 'grid' ? ' active' : ''}`;
     gridBtn.dataset.mode = 'grid';
-    gridBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="3" y="3" width="8" height="8" rx="1"/><rect x="13" y="3" width="8" height="8" rx="1"/><rect x="3" y="13" width="8" height="8" rx="1"/><rect x="13" y="13" width="8" height="8" rx="1"/></svg>';
+    setTrustedHtml(gridBtn, trustedHtml('<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="3" y="3" width="8" height="8" rx="1"/><rect x="13" y="3" width="8" height="8" rx="1"/><rect x="3" y="13" width="8" height="8" rx="1"/><rect x="13" y="13" width="8" height="8" rx="1"/></svg>', "legacy direct innerHTML migration"));
     gridBtn.title = 'Grid view';
     gridBtn.addEventListener('click', () => this.setViewMode('grid'));
 
     const singleBtn = document.createElement('button');
     singleBtn.className = `webcam-view-btn${this.viewMode === 'single' ? ' active' : ''}`;
     singleBtn.dataset.mode = 'single';
-    singleBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="3" y="3" width="18" height="14" rx="2"/><rect x="3" y="19" width="18" height="2" rx="1"/></svg>';
+    setTrustedHtml(singleBtn, trustedHtml('<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="3" y="3" width="18" height="14" rx="2"/><rect x="3" y="19" width="18" height="2" rx="1"/></svg>', "legacy direct innerHTML migration"));
     singleBtn.title = 'Single view';
     singleBtn.addEventListener('click', () => this.setViewMode('single'));
 
@@ -234,6 +265,7 @@ export class LiveWebcamsPanel extends Panel {
     if (feeds.length > 0 && !feeds.includes(this.activeFeed)) {
       this.activeFeed = feeds[0]!;
     }
+    this.savePrefs();
     this.render();
   }
 
@@ -241,6 +273,7 @@ export class LiveWebcamsPanel extends Panel {
     if (this.forceSingleView && mode === 'grid') return;
     if (mode === this.viewMode) return;
     this.viewMode = mode;
+    this.savePrefs();
     this.toolbar?.querySelectorAll('.webcam-view-btn').forEach(btn => {
       (btn as HTMLElement).classList.toggle('active', (btn as HTMLElement).dataset.mode === mode);
     });
@@ -331,7 +364,22 @@ export class LiveWebcamsPanel extends Panel {
       return;
     }
     const freshIframe = this.createIframe(tracker.feed);
-    oldIframe.replaceWith(freshIframe);
+    try {
+      oldIframe.replaceWith(freshIframe);
+    } catch {
+      // DOM was restructured between parentNode check and replaceWith (race with scroll/channel switch).
+      // Fall back to appending the fresh iframe to the container.
+      this.clearIframeTimeout(oldIframe);
+      this.iframeTrackers.delete(oldIframe);
+      oldIframe.src = 'about:blank';
+      tracker.container.querySelector('.webcam-embed-fallback')?.remove();
+      tracker.container.appendChild(freshIframe);
+      const idx = this.iframes.indexOf(oldIframe);
+      if (idx >= 0) this.iframes[idx] = freshIframe;
+      else this.iframes.push(freshIframe);
+      this.trackIframe(freshIframe, tracker.feed, tracker.container);
+      return;
+    }
     oldIframe.src = 'about:blank';
 
     const idx = this.iframes.indexOf(oldIframe);
@@ -421,7 +469,7 @@ export class LiveWebcamsPanel extends Panel {
     this.destroyIframes();
 
     if (!this.isVisible || this.isIdle) {
-      this.content.innerHTML = `<div class="webcam-placeholder">${escapeHtml(t('components.webcams.paused'))}</div>`;
+      setTrustedHtml(this.content, trustedHtml(`<div class="webcam-placeholder">${escapeHtml(t('components.webcams.paused'))}</div>`, "legacy direct innerHTML migration"));
       return;
     }
 
@@ -439,7 +487,7 @@ export class LiveWebcamsPanel extends Panel {
       return;
     }
 
-    this.content.innerHTML = '';
+    setTrustedHtml(this.content, trustedHtml('', "legacy direct innerHTML migration"));
     this.content.className = 'panel-content webcam-content';
 
     const grid = document.createElement('div');
@@ -454,7 +502,7 @@ export class LiveWebcamsPanel extends Panel {
 
       const label = document.createElement('div');
       label.className = 'webcam-cell-label';
-      label.innerHTML = `<span class="webcam-live-dot"></span><span class="webcam-city">${escapeHtml(feed.city.toUpperCase())}</span>`;
+      setTrustedHtml(label, trustedHtml(`<span class="webcam-live-dot"></span><span class="webcam-city">${escapeHtml(feed.city.toUpperCase())}</span>`, "legacy direct innerHTML migration"));
 
       if (desktop) {
         // On desktop, clicks pass through label (pointer-events:none in CSS)
@@ -462,7 +510,7 @@ export class LiveWebcamsPanel extends Panel {
         const expandBtn = document.createElement('button');
         expandBtn.className = 'webcam-expand-btn';
         expandBtn.title = t('webcams.expand') || 'Expand';
-        expandBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>';
+        setTrustedHtml(expandBtn, trustedHtml('<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>', "legacy direct innerHTML migration"));
         expandBtn.addEventListener('click', (e) => {
           e.stopPropagation();
           trackWebcamSelected(feed.id, feed.city, 'grid');
@@ -502,7 +550,7 @@ export class LiveWebcamsPanel extends Panel {
   }
 
   private renderSingle(): void {
-    this.content.innerHTML = '';
+    setTrustedHtml(this.content, trustedHtml('', "legacy direct innerHTML migration"));
     this.content.className = 'panel-content webcam-content';
 
     const wrapper = document.createElement('div');
@@ -519,7 +567,7 @@ export class LiveWebcamsPanel extends Panel {
     if (!this.forceSingleView) {
       const backBtn = document.createElement('button');
       backBtn.className = 'webcam-feed-btn webcam-back-btn';
-      backBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="3" y="3" width="8" height="8" rx="1"/><rect x="13" y="3" width="8" height="8" rx="1"/><rect x="3" y="13" width="8" height="8" rx="1"/><rect x="13" y="13" width="8" height="8" rx="1"/></svg> Grid';
+      setTrustedHtml(backBtn, trustedHtml('<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="3" y="3" width="8" height="8" rx="1"/><rect x="13" y="3" width="8" height="8" rx="1"/><rect x="3" y="13" width="8" height="8" rx="1"/><rect x="13" y="13" width="8" height="8" rx="1"/></svg> Grid', "legacy direct innerHTML migration"));
       backBtn.addEventListener('click', () => this.setViewMode('grid'));
       switcher.appendChild(backBtn);
     }
@@ -531,6 +579,7 @@ export class LiveWebcamsPanel extends Panel {
       btn.addEventListener('click', () => {
         trackWebcamSelected(feed.id, feed.city, 'single');
         this.activeFeed = feed;
+        this.savePrefs();
         this.render();
       });
       switcher.appendChild(btn);
@@ -631,7 +680,7 @@ export class LiveWebcamsPanel extends Panel {
       this.idleTimeout = setTimeout(() => {
         this.isIdle = true;
         this.destroyIframes();
-        this.content.innerHTML = `<div class="webcam-placeholder">${escapeHtml(t('components.webcams.pausedIdle'))}</div>`;
+        setTrustedHtml(this.content, trustedHtml(`<div class="webcam-placeholder">${escapeHtml(t('components.webcams.pausedIdle'))}</div>`, "legacy direct innerHTML migration"));
       }, ECO_IDLE_PAUSE_MS);
     };
 

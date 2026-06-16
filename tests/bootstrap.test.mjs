@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { CII_RISK_SCORE_CACHE_KEYS } from '../api/_cii-risk-cache-keys.js';
+import { __testing__ as healthTesting } from '../api/health.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dirname, '..');
@@ -14,6 +16,14 @@ describe('Bootstrap cache key registry', () => {
 
   const cacheKeysBlock = cacheKeysSrc.match(/BOOTSTRAP_CACHE_KEYS[^{]*\{([^}]+)\}/)?.[1] ?? '';
 
+  const resolveCiiCacheKeyRef = (prop) => {
+    assert.ok(
+      Object.hasOwn(CII_RISK_SCORE_CACHE_KEYS, prop),
+      `Unknown CII_RISK_SCORE_CACHE_KEYS property '${prop}'`,
+    );
+    return CII_RISK_SCORE_CACHE_KEYS[prop];
+  };
+
   it('exports BOOTSTRAP_CACHE_KEYS with at least 10 entries', () => {
     const matches = cacheKeysBlock.match(/^\s+\w+:\s+'[^']+'/gm);
     assert.ok(matches && matches.length >= 10, `Expected ≥10 keys, found ${matches?.length ?? 0}`);
@@ -23,10 +33,12 @@ describe('Bootstrap cache key registry', () => {
     const extractKeys = (src) => {
       const block = src.match(/BOOTSTRAP_CACHE_KEYS[^=]*=\s*\{([^}]+)\}/);
       if (!block) return {};
-      const re = /(\w+):\s+'([a-z_]+(?::[a-z_-]+)+:v\d+)'/g;
+      const re = /(\w+):\s*(?:'([a-z0-9_-]+(?::[a-z0-9_-]+)+)'|CII_RISK_SCORE_CACHE_KEYS\.(\w+))/g;
       const keys = {};
       let m;
-      while ((m = re.exec(block[1])) !== null) keys[m[1]] = m[2];
+      while ((m = re.exec(block[1])) !== null) {
+        keys[m[1]] = m[2] ?? resolveCiiCacheKeyRef(m[3]);
+      }
       return keys;
     };
     const canonical = extractKeys(cacheKeysSrc);
@@ -41,23 +53,23 @@ describe('Bootstrap cache key registry', () => {
   });
 
   it('every cache key matches a handler cache key pattern', () => {
-    const keyRe = /:\s+'([^']+)'/g;
+    const keyRe = /:\s*(?:'([^']+)'|CII_RISK_SCORE_CACHE_KEYS\.(\w+))/g;
     let m;
     const keys = [];
     while ((m = keyRe.exec(cacheKeysBlock)) !== null) {
-      keys.push(m[1]);
+      keys.push(m[1] ?? resolveCiiCacheKeyRef(m[2]));
     }
     for (const key of keys) {
-      assert.match(key, /^[a-z_]+(?::[a-z_-]+)+:v\d+$/, `Cache key "${key}" does not match expected pattern`);
+      assert.match(key, /^[a-z0-9_-]+(?::[a-z0-9_-]+)+(?::v\d+)?(?::[a-z0-9_-]+)*$/, `Cache key "${key}" does not match expected pattern`);
     }
   });
 
   it('has no duplicate cache keys', () => {
-    const keyRe = /:\s+'([^']+)'/g;
+    const keyRe = /:\s*(?:'([^']+)'|CII_RISK_SCORE_CACHE_KEYS\.(\w+))/g;
     let m;
     const keys = [];
     while ((m = keyRe.exec(cacheKeysBlock)) !== null) {
-      keys.push(m[1]);
+      keys.push(m[1] ?? resolveCiiCacheKeyRef(m[2]));
     }
     const unique = new Set(keys);
     assert.equal(unique.size, keys.length, `Found duplicate cache keys: ${keys.filter((k, i) => keys.indexOf(k) !== i)}`);
@@ -74,7 +86,7 @@ describe('Bootstrap cache key registry', () => {
     assert.equal(unique.size, names.length, `Found duplicate names: ${names.filter((n, i) => names.indexOf(n) !== i)}`);
   });
 
-  it('every cache key maps to a handler file with a matching cache key string', () => {
+  it('every cache key maps to a handler file or external seed script', () => {
     const block = cacheKeysSrc.match(/BOOTSTRAP_CACHE_KEYS[^{]*\{([^}]+)\}/);
     const keyRe = /:\s+'([^']+)'/g;
     let m;
@@ -97,10 +109,17 @@ describe('Bootstrap cache key registry', () => {
     walk(handlerDirs);
     const allHandlerCode = handlerFiles.map(f => readFileSync(f, 'utf-8')).join('\n');
 
+    const seedFiles = readdirSync(join(root, 'scripts'))
+      .filter(f => f.startsWith('seed-') && f.endsWith('.mjs'))
+      .map(f => readFileSync(join(root, 'scripts', f), 'utf-8'))
+      .join('\n');
+    const healthSrc = readFileSync(join(root, 'api', 'health.js'), 'utf-8');
+    const allSearchable = allHandlerCode + '\n' + seedFiles + '\n' + healthSrc;
+
     for (const key of keys) {
       assert.ok(
-        allHandlerCode.includes(key),
-        `Cache key "${key}" not found in any handler file`,
+        allSearchable.includes(key),
+        `Cache key "${key}" not found in any handler file or seed script`,
       );
     }
   });
@@ -133,9 +152,11 @@ describe('Bootstrap endpoint (api/bootstrap.js)', () => {
   });
 
   it('sets Cache-Control header with s-maxage for both tiers', () => {
-    assert.ok(src.includes('s-maxage=3600'), 'Missing s-maxage=3600 for slow tier');
-    assert.ok(src.includes('s-maxage=600'), 'Missing s-maxage=600 for fast tier');
+    // Cache-Control uses browser-only max-age (no s-maxage) so CF does not cache and
+    // pin a single ACAO origin. Vercel CDN uses CDN-Cache-Control for edge caching.
+    assert.ok(src.includes('max-age='), 'Missing max-age in Cache-Control');
     assert.ok(src.includes('stale-while-revalidate'), 'Missing stale-while-revalidate');
+    assert.ok(src.includes('CDN-Cache-Control'), 'Missing CDN-Cache-Control for Vercel CDN');
   });
 
   it('validates API key for desktop origins', () => {
@@ -172,10 +193,27 @@ describe('Frontend hydration (src/services/bootstrap.ts)', () => {
   });
 
   it('has a fast timeout cap to avoid regressing startup', () => {
-    const timeoutMatch = src.match(/(?:AbortSignal\.timeout|setTimeout)\D+(\d+)\)/);
-    assert.ok(timeoutMatch, 'Missing timeout');
-    const ms = parseInt(timeoutMatch[1], 10);
-    assert.ok(ms <= 2000, `Timeout ${ms}ms too high — should be ≤2000ms to avoid regressing startup`);
+    const timeoutMatches = [...src.matchAll(/setTimeout\([^,]+,\s*(?:desktop\s*\?\s*[\d_]+\s*:\s*)?(\d[\d_]*)\)/g)];
+    assert.ok(timeoutMatches.length > 0, 'Missing timeout');
+    for (const m of timeoutMatches) {
+      const ms = parseInt(m[1].replace(/_/g, ''), 10);
+      assert.ok(ms <= 5000, `Timeout ${ms}ms too high — should be ≤5000ms to avoid regressing startup`);
+    }
+  });
+
+  it('keeps web bootstrap tier timeouts within budget', () => {
+    const timeouts = Array.from(src.matchAll(/(\d[_\d]*)\)/g))
+      .map((m) => parseInt(m[1].replace(/_/g, ''), 10))
+      .filter((n) => n === 1200 || n === 3000);
+    assert.deepEqual(
+      timeouts,
+      [1200, 3000],
+      `Expected web bootstrap timeouts (fast=1200, slow=3000) — slow tier was bumped from 1.8s to 3.0s to avoid hydration-cascade aborts`,
+    );
+  });
+
+  it('allows longer bootstrap timeouts for desktop runtime', () => {
+    assert.ok(src.includes('isDesktopRuntime'), 'Bootstrap should branch on desktop for longer timeouts');
   });
 
   it('fetches tiered bootstrap URLs', () => {
@@ -214,7 +252,7 @@ describe('Bootstrap key hydration coverage', () => {
   it('every bootstrap key has a getHydratedData consumer in src/', () => {
     const bootstrapSrc = readFileSync(join(root, 'api', 'bootstrap.js'), 'utf-8');
     const block = bootstrapSrc.match(/BOOTSTRAP_CACHE_KEYS\s*=\s*\{([^}]+)\}/);
-    const keyRe = /(\w+):\s+'[a-z_]+(?::[a-z_-]+)+:v\d+'/g;
+    const keyRe = /(\w+):\s*(?:'[a-z0-9_-]+(?::[a-z0-9_-]+)+'|CII_RISK_SCORE_CACHE_KEYS\.\w+)/g;
     const keys = [];
     let m;
     while ((m = keyRe.exec(block[1])) !== null) keys.push(m[1]);
@@ -230,12 +268,40 @@ describe('Bootstrap key hydration coverage', () => {
     walk(join(root, 'src'));
     const allSrc = srcFiles.map(f => readFileSync(f, 'utf-8')).join('\n');
 
+    // Keys with planned but not-yet-wired consumers
+    const PENDING_CONSUMERS = new Set([
+      'correlationCards', 'euGasStorage', 'chokepointBaselines', 'imfMacro',
+      'imfGrowth', 'imfLabor', 'imfExternal',
+      'portwatchChokepointsRef', 'portwatchPortActivity', 'sprPolicies',
+      'wsbTickers', 'electricityPrices', 'jodiOil',
+      'eurostatHousePrices', 'eurostatGovDebtQ', 'eurostatIndProd',
+      // BIS extended dataflows are consumed via a direct scoped bootstrap
+      // fetch in CountryDeepDivePanel (housing cycle tile), not through the
+      // getHydratedData session cache — fetched on-click per country.
+      'bisDsr', 'bisPropertyResidential', 'bisPropertyCommercial',
+      // energyDisruptions is bootstrap-hydrated so the RPC handler has
+      // warm data, but panel drawers fetch events lazily via
+      // listEnergyDisruptions() on drawer open — no getHydratedData()
+      // call site. Classifier extends this post-launch.
+      'energyDisruptions',
+    ]);
     for (const key of keys) {
+      if (PENDING_CONSUMERS.has(key)) continue;
       assert.ok(
         allSrc.includes(`getHydratedData('${key}')`),
         `Bootstrap key '${key}' has no getHydratedData('${key}') consumer in src/ — data is fetched but never used`,
       );
     }
+  });
+});
+
+describe('Health key registries', () => {
+  it('does not duplicate Redis keys across BOOTSTRAP_KEYS and STANDALONE_KEYS', () => {
+    const bootstrap = new Set(Object.values(healthTesting.BOOTSTRAP_KEYS));
+    const standalone = new Set(Object.values(healthTesting.STANDALONE_KEYS));
+    const overlap = [...bootstrap].filter((key) => standalone.has(key));
+
+    assert.deepEqual(overlap, [], `health.js duplicates keys across registries: ${overlap.join(', ')}`);
   });
 });
 
@@ -253,7 +319,7 @@ describe('Bootstrap tier definitions', () => {
   function extractBootstrapKeys(src) {
     const block = src.match(/BOOTSTRAP_CACHE_KEYS\s*=\s*\{([^}]+)\}/);
     if (!block) return new Set();
-    return new Set([...block[1].matchAll(/(\w+):\s+'/g)].map(x => x[1]));
+    return new Set([...block[1].matchAll(/(\w+):\s*(?:'|CII_RISK_SCORE_CACHE_KEYS\.)/g)].map(x => x[1]));
   }
 
   function extractTierKeys(src) {

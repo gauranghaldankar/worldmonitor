@@ -1,3 +1,4 @@
+import { getRpcBaseUrl } from '@/services/rpc-client';
 import {
   WildfireServiceClient,
   type FireDetection,
@@ -17,6 +18,7 @@ export interface FireRegionStats {
   fireCount: number;
   totalFrp: number;
   highIntensityCount: number;
+  possibleExplosionCount: number;
 }
 
 export interface FetchResult {
@@ -39,7 +41,7 @@ export interface MapFire {
 
 // -- Client --
 
-const client = new WildfireServiceClient('', { fetch: (...args) => globalThis.fetch(...args) });
+const client = new WildfireServiceClient(getRpcBaseUrl(), { fetch: (...args) => globalThis.fetch(...args) });
 const breaker = createCircuitBreaker<ListFireDetectionsResponse>({ name: 'Wildfires', cacheTtlMs: 30 * 60 * 1000, persistCache: true });
 
 const emptyFallback: ListFireDetectionsResponse = { fireDetections: [] };
@@ -73,12 +75,14 @@ export function computeRegionStats(regions: Record<string, FireDetection[]>): Fi
     const highIntensity = fires.filter(
       f => f.brightness > 360 && f.confidence === 'FIRE_CONFIDENCE_HIGH',
     );
+    const possibleExplosions = fires.filter(f => f.possibleExplosion);
     stats.push({
       region,
       fires,
       fireCount: fires.length,
       totalFrp: fires.reduce((sum, f) => sum + (f.frp || 0), 0),
       highIntensityCount: highIntensity.length,
+      possibleExplosionCount: possibleExplosions.length,
     });
   }
 

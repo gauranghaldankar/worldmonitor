@@ -2,6 +2,7 @@ import type { BreakingAlert } from '@/services/breaking-news-alerts';
 import { getAlertSettings } from '@/services/breaking-news-alerts';
 import { getSourcePanelId } from '@/config/feeds';
 import { t } from '@/services/i18n';
+import { isMobileDevice } from '@/utils';
 
 const MAX_ALERTS = 3;
 const CRITICAL_DISMISS_MS = 60_000;
@@ -28,11 +29,22 @@ export class BreakingNewsBanner {
   private boundOnVisibility: () => void;
   private boundOnResize: () => void;
   private dismissed = new Map<string, number>();
+  private highlightTimers = new WeakMap<Element, ReturnType<typeof setTimeout>>();
+  private readonly inFlow: boolean;
 
   constructor() {
     this.container = document.createElement('div');
     this.container.className = 'breaking-news-container';
-    document.body.appendChild(this.container);
+    // Desktop: fixed body-level overlay. Mobile: join the app flex column
+    // below the header (same slot as the critical posture banner, which
+    // stays above when both are present) so alerts push content down
+    // instead of covering the sticky chip nav / map header band.
+    const anchor = isMobileDevice()
+      ? document.querySelector('.critical-posture-banner') ?? document.querySelector('.header')
+      : null;
+    this.inFlow = !!anchor;
+    if (anchor) anchor.insertAdjacentElement('afterend', this.container);
+    else document.body.appendChild(this.container);
 
     this.initAudio();
     this.updatePosition();
@@ -96,6 +108,12 @@ export class BreakingNewsBanner {
   }
 
   private updatePosition(): void {
+    // In-flow (mobile) container: document flow handles stacking under the
+    // header/posture banner; inline `top` is meaningless on static position.
+    if (this.inFlow) {
+      this.updateOffset();
+      return;
+    }
     let top = 50;
     if (document.body?.classList.contains('has-critical-banner')) {
       this.attachResizeObserverIfNeeded();
@@ -176,11 +194,21 @@ export class BreakingNewsBanner {
   }
 
   private scrollToPanel(panelId: string): void {
+    // Synchronous: lets the mobile category nav clear a filter that would
+    // leave the target display:none (scrollIntoView would silently no-op).
+    window.dispatchEvent(new CustomEvent('wm:reveal-panel', { detail: { panelId } }));
     const panel = document.querySelector(`[data-panel="${panelId}"]`);
     if (!panel) return;
     panel.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    panel.classList.add('flash-highlight');
-    setTimeout(() => panel.classList.remove('flash-highlight'), 1500);
+    const prev = this.highlightTimers.get(panel);
+    if (prev) clearTimeout(prev);
+    panel.classList.remove('search-highlight');
+    void (panel as HTMLElement).offsetWidth;
+    panel.classList.add('search-highlight');
+    this.highlightTimers.set(panel, setTimeout(() => {
+      panel.classList.remove('search-highlight');
+      this.highlightTimers.delete(panel);
+    }, 3100));
   }
 
   private createAlertElement(alert: BreakingAlert): HTMLElement {

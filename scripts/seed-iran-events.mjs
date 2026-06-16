@@ -108,6 +108,61 @@ const LOCATION_COORDS = {
   'sanandaj':      { lat: 35.3219, lon: 46.9862 },
   'ma\'ameer':     { lat: 26.0500, lon: 50.5200 },
   'northern cyprus': { lat: 35.1856, lon: 33.3823 },
+  'borujerd':      { lat: 33.8973, lon: 48.7516 },
+  'lamerd':        { lat: 27.3373, lon: 53.1831 },
+  'chabahar':      { lat: 25.2919, lon: 60.6430 },
+  'shahrekord':    { lat: 32.3256, lon: 50.8644 },
+  'parand':        { lat: 35.4870, lon: 51.0050 },
+  'rabat karim':   { lat: 35.4700, lon: 51.0700 },
+  'shahriar':      { lat: 35.6569, lon: 51.0592 },
+  'punak':         { lat: 35.7600, lon: 51.3600 },
+  'bonab':         { lat: 37.3404, lon: 46.0561 },
+  'ghaniabad':     { lat: 35.4500, lon: 51.6500 },
+  'beit shemesh':  { lat: 31.7469, lon: 34.9876 },
+  'bnei brak':     { lat: 32.0833, lon: 34.8333 },
+  'quneitra':      { lat: 33.1260, lon: 35.8240 },
+  'khan arnabeh':  { lat: 33.1450, lon: 35.8600 },
+  'ruwais':        { lat: 24.1100, lon: 52.7300 },
+  'mehrshahr':     { lat: 35.8300, lon: 50.9700 },
+  'qaim':          { lat: 34.3800, lon: 41.0400 },
+  'prince sultan': { lat: 24.0625, lon: 47.5808 },
+  'ramat david':   { lat: 32.6650, lon: 35.1792 },
+  'vietnam':       { lat: 14.0583, lon: 108.2772 },
+  'south korea':   { lat: 35.9078, lon: 127.7669 },
+  'ilam':          { lat: 33.6374, lon: 46.4227 },
+  'kerman':        { lat: 30.2839, lon: 57.0834 },
+  'lorestan':      { lat: 33.4941, lon: 48.3530 },
+  'jerusalem':     { lat: 31.7683, lon: 35.2137 },
+  'fardis':        { lat: 35.7230, lon: 50.9875 },
+  'marivan':       { lat: 35.5269, lon: 46.1761 },
+  'salalah':       { lat: 17.0151, lon: 54.0924 },
+  'palmachim':     { lat: 31.8970, lon: 34.7000 },
+  'umm qasr':      { lat: 30.0362, lon: 47.9298 },
+  'al-siba':       { lat: 29.8700, lon: 48.6100 },
+  'taleghan':      { lat: 36.1700, lon: 50.7600 },
+  'persian gulf':  { lat: 27.0000, lon: 51.5000 },
+  'eastern province': { lat: 26.4207, lon: 50.0888 },
+  'empty quarter': { lat: 22.5200, lon: 54.0000 },
+  'ovadia':        { lat: 31.4700, lon: 34.5300 },
+  'shin bet':      { lat: 31.7683, lon: 35.2137 },
+  'kharg':         { lat: 29.2635, lon: 50.3273 },
+  'qom':           { lat: 34.6401, lon: 50.8764 },
+  'andisheh':      { lat: 35.7050, lon: 51.0000 },
+  'ankara':        { lat: 39.9334, lon: 32.8597 },
+  'minab':         { lat: 27.1452, lon: 57.0812 },
+  'asaluyeh':      { lat: 27.4834, lon: 52.6121 },
+  'south pars':    { lat: 27.5000, lon: 52.5000 },
+  'al-ahmadi':     { lat: 29.0769, lon: 48.0839 },
+  'mina al-ahmadi': { lat: 29.0769, lon: 48.0839 },
+  'mina abdullah': { lat: 28.9600, lon: 48.1600 },
+  'kafr qasim':    { lat: 32.1161, lon: 34.9750 },
+  'taybad':        { lat: 35.1884, lon: 60.7814 },
+  'sweihan':       { lat: 24.4041, lon: 55.3325 },
+  'mahshahr':      { lat: 30.5630, lon: 49.1980 },
+  'bandar khamir': { lat: 26.9592, lon: 55.8981 },
+  'shalamcheh':    { lat: 30.5244, lon: 47.9297 },
+  'ramat gan':     { lat: 32.0704, lon: 34.8237 },
+  'shuwaikh':      { lat: 29.3636, lon: 47.9417 },
 };
 
 const CATEGORY_MAP = {
@@ -139,12 +194,12 @@ function categorizeSeverity(title) {
 function parseRelativeTime(timeStr) {
   const now = Date.now();
   const match = timeStr.match(/(\d+)\s+hours?\s+ago/);
-  if (match) return now - parseInt(match[1]) * 3600_000;
+  if (match) return now - parseInt(match[1], 10) * 3600_000;
   const minMatch = timeStr.match(/(\d+)\s+min/);
-  if (minMatch) return now - parseInt(minMatch[1]) * 60_000;
+  if (minMatch) return now - parseInt(minMatch[1], 10) * 60_000;
   if (/a day ago/.test(timeStr)) return now - 86400_000;
   const dayMatch = timeStr.match(/(\d+)\s+days?\s+ago/);
-  if (dayMatch) return now - parseInt(dayMatch[1]) * 86400_000;
+  if (dayMatch) return now - parseInt(dayMatch[1], 10) * 86400_000;
   return now;
 }
 
@@ -185,11 +240,29 @@ function validate(data) {
   return Array.isArray(data?.events) && data.events.length >= 1;
 }
 
+export function declareRecords(data) {
+  return Array.isArray(data?.events) ? data.events.length : 0;
+}
+
 runSeed('conflict', 'iran-events', CANONICAL_KEY, fetchIranEvents, {
   validateFn: validate,
-  ttlSeconds: 172800,
+  // 14d canonical TTL == maxStaleMin (20160 min = 14d). This is a MANUALLY
+  // re-seeded source (operator runs the script ~weekly when LiveUAMap has
+  // fresh events); pre-fix the canonical TTL was 2 days while the
+  // health-tolerance was 14 days, so any operator-cadence delay >2d left
+  // the canonical TTL'd-out while seed-meta survived. Health then reported
+  // `iranEvents: EMPTY records=0` while seed-meta still showed last-good
+  // recordCount. Symptom on WM 2026-05-08: last manual seed 2.7d ago
+  // (within tolerance), but canonical missing → CRIT in /api/health.
+  // Bumping canonical TTL to match maxStaleMin keeps the canonical alive
+  // for the full health-tolerance window. Same trap family as BIS PR #3610.
+  ttlSeconds: 1209600,     // 14 days = 14 * 24 * 3600
   sourceVersion: 'liveuamap-manual-v1',
+
+  declareRecords,
+  schemaVersion: 1,
+  maxStaleMin: 20160,
 }).catch((err) => {
-  console.error('FATAL:', err.message || err);
+  const _cause = err.cause ? ` (cause: ${err.cause.message || err.cause.code || err.cause})` : ''; console.error('FATAL:', (err.message || err) + _cause);
   process.exit(0);
 });

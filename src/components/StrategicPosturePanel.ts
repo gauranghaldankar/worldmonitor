@@ -1,5 +1,5 @@
 import { Panel } from './Panel';
-import { escapeHtml } from '@/utils/sanitize';
+import { escapeHtml, unsafeRawHtml } from '@/utils/sanitize';
 import { fetchCachedTheaterPosture, type CachedTheaterPosture } from '@/services/cached-theater-posture';
 import { fetchMilitaryVessels } from '@/services/military-vessels';
 import { recalcPostureWithVessels, type TheaterPostureSummary } from '@/services/military-surge';
@@ -24,6 +24,7 @@ export class StrategicPosturePanel extends Panel {
       showCount: false,
       trackActivity: true,
       infoTooltip: t('components.strategicPosture.infoTooltip'),
+      defaultRowSpan: 2,
     });
     this.init();
   }
@@ -53,7 +54,7 @@ export class StrategicPosturePanel extends Panel {
 
   public override showLoading(): void {
     this.loadingStartTime = Date.now();
-    this.setContent(`
+    this.setSafeContent(unsafeRawHtml(`
       <div class="posture-panel">
         <div class="posture-loading">
           <div class="posture-loading-radar">
@@ -80,7 +81,7 @@ export class StrategicPosturePanel extends Panel {
           <div class="posture-loading-note">${t('components.strategicPosture.initialLoadNote')}</div>
         </div>
       </div>
-    `);
+    `, 'legacy Panel.setContent() migration'));
     this.startLoadingTimer();
   }
 
@@ -302,7 +303,7 @@ export class StrategicPosturePanel extends Panel {
 
   private showNoData(): void {
     this.stopLoadingTimer();
-    this.setContent(`
+    this.setSafeContent(unsafeRawHtml(`
       <div class="posture-panel">
         <div class="posture-no-data">
           <div class="posture-no-data-icon pulse">📡</div>
@@ -323,13 +324,13 @@ export class StrategicPosturePanel extends Panel {
           <button class="posture-retry-btn" data-panel-retry>↻ ${t('components.strategicPosture.retryNow')}</button>
         </div>
       </div>
-    `);
+    `, 'legacy Panel.setContent() migration'));
     this.setRetryCallback(() => this.refresh());
   }
 
   private showFetchError(): void {
     this.stopLoadingTimer();
-    this.setContent(`
+    this.setSafeContent(unsafeRawHtml(`
       <div class="posture-panel">
         <div class="posture-no-data">
           <div class="posture-no-data-icon">⚠️</div>
@@ -343,7 +344,7 @@ export class StrategicPosturePanel extends Panel {
           <button class="posture-retry-btn" data-panel-retry>↻ ${t('components.strategicPosture.tryAgain')}</button>
         </div>
       </div>
-    `);
+    `, 'legacy Panel.setContent() migration'));
     this.setRetryCallback(() => this.refresh());
   }
 
@@ -463,6 +464,28 @@ export class StrategicPosturePanel extends Panel {
     const html = `
       <div class="posture-panel">
         ${staleWarning}
+
+        <details class="posture-emoji-key">
+          <summary>💡 ${t('components.strategicPosture.emojiKeyLabel')}</summary>
+          <div class="posture-emoji-key-body">
+            <div class="posture-emoji-key-section">${t('components.strategicPosture.emojiKeyAir')}</div>
+            <div class="posture-emoji-key-item"><span>✈️</span><span>${t('components.strategicPosture.units.fighters')}</span></div>
+            <div class="posture-emoji-key-item"><span>⛽</span><span>${t('components.strategicPosture.units.tankers')}</span></div>
+            <div class="posture-emoji-key-item"><span>📡</span><span>${t('components.strategicPosture.units.awacs')}</span></div>
+            <div class="posture-emoji-key-item"><span>🔍</span><span>${t('components.strategicPosture.units.recon')}</span></div>
+            <div class="posture-emoji-key-item"><span>📦</span><span>${t('components.strategicPosture.units.transport')}</span></div>
+            <div class="posture-emoji-key-item"><span>💣</span><span>${t('components.strategicPosture.units.bombers')}</span></div>
+            <div class="posture-emoji-key-item"><span>🛸</span><span>${t('components.strategicPosture.units.drones')}</span></div>
+            <div class="posture-emoji-key-section">${t('components.strategicPosture.emojiKeyNaval')}</div>
+            <div class="posture-emoji-key-item"><span>🚢</span><span>${t('components.strategicPosture.units.carriers')}</span></div>
+            <div class="posture-emoji-key-item"><span>⚓</span><span>${t('components.strategicPosture.units.destroyers')}</span></div>
+            <div class="posture-emoji-key-item"><span>🛥️</span><span>${t('components.strategicPosture.units.frigates')}</span></div>
+            <div class="posture-emoji-key-item"><span>🦈</span><span>${t('components.strategicPosture.units.submarines')}</span></div>
+            <div class="posture-emoji-key-item"><span>🚤</span><span>${t('components.strategicPosture.units.patrol')}</span></div>
+            <div class="posture-emoji-key-item"><span>⚓</span><span>${t('components.strategicPosture.units.auxiliary')}</span></div>
+          </div>
+        </details>
+
         ${sorted.map((p) => this.renderTheater(p)).join('')}
 
         <div class="posture-footer">
@@ -472,7 +495,7 @@ export class StrategicPosturePanel extends Panel {
       </div>
     `;
 
-    this.setContent(html);
+    this.setSafeContent(unsafeRawHtml(html, 'legacy Panel.setContent() migration'));
     this.attachEventListeners();
   }
 
@@ -499,7 +522,7 @@ export class StrategicPosturePanel extends Panel {
           element: (el as HTMLElement).textContent?.slice(0, 30),
           hasHandler: !!this.onLocationClick,
         });
-        if (this.onLocationClick && !isNaN(lat) && !isNaN(lon)) {
+        if (this.onLocationClick && !Number.isNaN(lat) && !Number.isNaN(lon)) {
           console.log('[StrategicPosturePanel] Calling onLocationClick with:', lat, lon);
           this.onLocationClick(lat, lon);
         } else {

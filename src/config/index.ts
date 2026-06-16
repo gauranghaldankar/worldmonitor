@@ -12,6 +12,8 @@ export {
   REFRESH_INTERVALS,
   MONITOR_COLORS,
   STORAGE_KEYS,
+  DEFAULT_MAP_MODE,
+  type MapModePreference,
 } from './variants/base';
 
 // Market data (shared)
@@ -42,6 +44,14 @@ export {
   DEFAULT_MAP_LAYERS,
   MOBILE_DEFAULT_MAP_LAYERS,
   LAYER_TO_SOURCE,
+  ALL_PANELS,
+  VARIANT_DEFAULTS,
+  VARIANT_PANEL_OVERRIDES,
+  getEffectivePanelConfig,
+  isPanelInVariantDefaults,
+  isPanelEntitled,
+  FREE_MAX_PANELS,
+  FREE_MAX_SOURCES,
 } from './panels';
 
 // ============================================
@@ -56,20 +66,27 @@ export {
   INTEL_SOURCES,
 } from './feeds';
 
+// CANONICAL_FEEDS is the union of every variant's feed map — by design it
+// references all *_FEEDS consts, so unlike FEEDS it is NOT tree-shaken per
+// variant (~10KB gz). Required so a panel customized in from another variant
+// can resolve its feeds. See src/config/feed-resolution.ts.
+export { CANONICAL_FEEDS } from './feeds';
+
 export {
   INTEL_HOTSPOTS,
   CONFLICT_ZONES,
 
   MILITARY_BASES,
   NUCLEAR_FACILITIES,
-  APT_GROUPS,
   STRATEGIC_WATERWAYS,
   ECONOMIC_CENTERS,
   SANCTIONED_COUNTRIES,
+  SANCTIONED_COUNTRIES_ALPHA2,
   SPACEPORTS,
   CRITICAL_MINERALS,
 } from './geo';
 
+export { APT_GROUPS } from './apt-groups';
 export { GAMMA_IRRADIATORS } from './irradiators';
 export { PIPELINES, PIPELINE_COLORS } from './pipelines';
 export { PORTS } from './ports';

@@ -234,6 +234,19 @@ make install-buf       # Install buf CLI (requires Go)
 make install-plugins   # Install sebuf protoc-gen plugins (requires Go)
 ```
 
+The pinned sebuf version is set by `SEBUF_VERSION` in the `Makefile` (currently **v0.11.1**). All three plugins — `protoc-gen-ts-client`, `protoc-gen-ts-server`, `protoc-gen-openapiv3` — must be installed from the same sebuf release. If you see codegen drift after pulling, rerun `make install-plugins` to resync.
+
+### OpenAPI Output
+
+`make generate` (i.e. `cd proto && buf generate`) produces:
+
+| File | Purpose |
+| --- | --- |
+| `docs/api/{Service}.openapi.yaml` / `.json` | Per-service specs — referenced individually by Mintlify in `docs/docs.json` |
+| `docs/api/worldmonitor.openapi.yaml` | **Unified bundle** spanning every service (sebuf ≥ v0.11.0) — use this for external consumers, API explorers, or anywhere you want a single spec covering all RPCs |
+
+The unified bundle is emitted by a third `protoc-gen-openapiv3` invocation in `proto/buf.gen.yaml` using `bundle=true`, `bundle_only=true`, and `strategy: all`. Regenerate alongside the per-service files; do not edit by hand.
+
 ## Adding Data Sources
 
 To add a new data layer to the map:
@@ -259,10 +272,10 @@ For endpoints that deal with non-JSON payloads (XML feeds, binary data, HTML emb
 
 ### Country boundary overrides
 
-Country outlines are loaded from `public/data/countries.geojson`. Optional higher-resolution overrides (sourced from [Natural Earth](https://www.naturalearthdata.com/)) are served from R2 CDN. The app loads overrides after the main file and replaces geometry for any country whose `ISO3166-1-Alpha-2` (or `ISO_A2`) matches. To refresh the Pakistan boundary from Natural Earth, run:
+Country outlines are loaded from `public/data/countries.geojson`. Optional higher-resolution overrides (sourced from [Natural Earth](https://www.naturalearthdata.com/)) are served from R2 CDN. The app loads overrides after the main file and replaces geometry for any country whose `ISO3166-1-Alpha-2` (or `ISO_A2`) matches. To refresh boundary overrides from Natural Earth, run:
 
 ```bash
-node scripts/fetch-pakistan-boundary-override.mjs
+node scripts/fetch-country-boundary-overrides.mjs
 rclone copy public/data/country-boundary-overrides.geojson r2:worldmonitor-maps/
 ```
 

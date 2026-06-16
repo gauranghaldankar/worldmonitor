@@ -1,11 +1,14 @@
 import { getCorsHeaders, isDisallowedOrigin } from './_cors.js';
+import { jsonResponse } from './_json-response.js';
+// @ts-expect-error — JS module, no declaration file
+import { readJsonFromUpstash, setCachedData } from './_upstash-json.js';
 
 export const config = { runtime: 'edge' };
 
 const NOMINATIM_BASE = 'https://nominatim.openstreetmap.org/reverse';
 const CHROME_UA = 'WorldMonitor/2.0 (https://worldmonitor.app)';
 
-export default async function handler(req) {
+export default async function handler(req, ctx) {
   if (isDisallowedOrigin(req))
     return new Response('Forbidden', { status: 403 });
 
@@ -19,38 +22,23 @@ export default async function handler(req) {
 
   const latN = Number(lat);
   const lonN = Number(lon);
-  if (!lat || !lon || isNaN(latN) || isNaN(lonN)
+  if (!lat || !lon || Number.isNaN(latN) || Number.isNaN(lonN)
       || latN < -90 || latN > 90 || lonN < -180 || lonN > 180) {
-    return new Response(JSON.stringify({ error: 'valid lat (-90..90) and lon (-180..180) required' }), {
-      status: 400,
-      headers: { ...cors, 'Content-Type': 'application/json' },
-    });
+    return jsonResponse({ error: 'valid lat (-90..90) and lon (-180..180) required' }, 400, cors);
   }
 
-  const redisUrl = process.env.UPSTASH_REDIS_REST_URL;
-  const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
   const cacheKey = `geocode:${latN.toFixed(1)},${lonN.toFixed(1)}`;
 
-  if (redisUrl && redisToken) {
-    try {
-      const cached = await fetch(`${redisUrl}/get/${encodeURIComponent(cacheKey)}`, {
-        headers: { Authorization: `Bearer ${redisToken}` },
-        signal: AbortSignal.timeout(1500),
-      });
-      if (cached.ok) {
-        const data = await cached.json();
-        if (data.result) {
-          return new Response(data.result, {
-            status: 200,
-            headers: {
-              ...cors,
-              'Content-Type': 'application/json',
-              'Cache-Control': 'public, s-maxage=86400, stale-while-revalidate=3600',
-            },
-          });
-        }
-      }
-    } catch { /* cache miss, fetch fresh */ }
+  const cached = await readJsonFromUpstash(cacheKey, 1500);
+  if (cached) {
+    return new Response(JSON.stringify(cached), {
+      status: 200,
+      headers: {
+        ...cors,
+        'Content-Type': 'application/json',
+        'Cache-Control': 'public, s-maxage=86400, stale-while-revalidate=3600',
+      },
+    });
   }
 
   try {
@@ -63,10 +51,7 @@ export default async function handler(req) {
     );
 
     if (!resp.ok) {
-      return new Response(JSON.stringify({ error: `Nominatim ${resp.status}` }), {
-        status: 502,
-        headers: { ...cors, 'Content-Type': 'application/json' },
-      });
+      return jsonResponse({ error: `Nominatim ${resp.status}` }, 502, cors);
     }
 
     const data = await resp.json();
@@ -76,12 +61,8 @@ export default async function handler(req) {
     const result = { country: country || null, code: code || null, displayName: data.display_name || country || '' };
     const body = JSON.stringify(result);
 
-    if (redisUrl && redisToken && country && code) {
-      fetch(redisUrl, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${redisToken}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify(['SET', cacheKey, body, 'EX', 604800]),
-      }).catch(() => {});
+    if (country && code) {
+      ctx.waitUntil(setCachedData(cacheKey, result, 604800));
     }
 
     return new Response(body, {
@@ -93,9 +74,6 @@ export default async function handler(req) {
       },
     });
   } catch (err) {
-    return new Response(JSON.stringify({ error: 'Nominatim request failed' }), {
-      status: 502,
-      headers: { ...cors, 'Content-Type': 'application/json' },
-    });
+    return jsonResponse({ error: 'Nominatim request failed' }, 502, cors);
   }
 }

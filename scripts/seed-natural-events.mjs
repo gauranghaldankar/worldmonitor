@@ -8,7 +8,7 @@ const EONET_API_URL = 'https://eonet.gsfc.nasa.gov/api/v3/events';
 const GDACS_API = 'https://www.gdacs.org/gdacsapi/api/events/geteventlist/MAP';
 const NHC_BASE = 'https://mapservices.weather.noaa.gov/tropical/rest/services/tropical/NHC_tropical_weather/MapServer';
 const CANONICAL_KEY = 'natural:events:v1';
-const CACHE_TTL = 3600; // 1 hour
+const CACHE_TTL = 43200; // 12h — 6x the 2h cron interval; was 1h (TTL < maxStaleMin:120 — panel went dark before health alarmed)
 
 const DAYS = 30;
 const WILDFIRE_MAX_AGE_MS = 48 * 60 * 60 * 1000;
@@ -419,11 +419,19 @@ function validate(data) {
   return Array.isArray(data?.events);
 }
 
+export function declareRecords(data) {
+  return Array.isArray(data?.events) ? data.events.length : 0;
+}
+
 runSeed('natural', 'events', CANONICAL_KEY, fetchNaturalEvents, {
   validateFn: validate,
   ttlSeconds: CACHE_TTL,
   sourceVersion: 'eonet+gdacs+nhc',
+
+  declareRecords,
+  schemaVersion: 1,
+  maxStaleMin: 360,
 }).catch((err) => {
-  console.error('FATAL:', err.message || err);
+  const _cause = err.cause ? ` (cause: ${err.cause.message || err.cause.code || err.cause})` : ''; console.error('FATAL:', (err.message || err) + _cause);
   process.exit(1);
 });
