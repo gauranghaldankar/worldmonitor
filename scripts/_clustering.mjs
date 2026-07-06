@@ -1,6 +1,12 @@
 #!/usr/bin/env node
 
 import { createRequire } from 'node:module';
+// #4919: story similarity is delegated to the shared story-identity
+// module (scripts/shared mirror — same rootDirectory=scripts reason as
+// the JSON requires below). The local Jaccard-0.5 matcher this file
+// carried was one of three inconsistent "same story?" answers in the
+// codebase; all three now share ONE definition and threshold.
+import { clusterTexts } from './shared/story-identity.js';
 
 const require = createRequire(import.meta.url);
 const SOURCE_TIERS = require('./shared/source-tiers.json');
@@ -9,20 +15,8 @@ const SOURCE_TIERS = require('./shared/source-tiers.json');
 // is not in the container. Matches the SOURCE_TIERS pattern above.
 const DIPLOMACY_KEYWORDS_DATA = require('./shared/diplomacy-keywords.json');
 
-const SIMILARITY_THRESHOLD = 0.5;
 const ENTITY_CORROBORATION_WINDOW_MS = 24 * 60 * 60 * 1000;
 
-const STOP_WORDS = new Set([
-  'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
-  'of', 'with', 'by', 'from', 'as', 'is', 'was', 'are', 'were', 'been',
-  'be', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would',
-  'could', 'should', 'may', 'might', 'must', 'shall', 'can', 'need',
-  'it', 'its', 'this', 'that', 'these', 'those', 'i', 'you', 'he',
-  'she', 'we', 'they', 'what', 'which', 'who', 'whom', 'how', 'when',
-  'where', 'why', 'all', 'each', 'every', 'both', 'few', 'more', 'most',
-  'other', 'some', 'such', 'no', 'not', 'only', 'same', 'so', 'than',
-  'too', 'very', 'just', 'also', 'now', 'new', 'says', 'said', 'after',
-]);
 
 const MILITARY_KEYWORDS = [
   'war', 'armada', 'invasion', 'airstrike', 'strike', 'missile', 'troops',
@@ -57,14 +51,6 @@ const DEMOTE_KEYWORDS = [
   'quarterly', 'profit', 'investor', 'ipo', 'funding', 'valuation',
 ];
 
-function tokenize(text) {
-  const words = text
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .split(/\s+/)
-    .filter(w => w.length > 2 && !STOP_WORDS.has(w));
-  return new Set(words);
-}
 
 function finiteNumber(value, fallback = 0) {
   const n = Number(value);
@@ -131,59 +117,15 @@ function containsKeywordToken(text, kw) {
   return new RegExp(`(^|\\s)${escaped}`).test(text);
 }
 
-function jaccardSimilarity(a, b) {
-  if (a.size === 0 && b.size === 0) return 0;
-  let intersection = 0;
-  for (const x of a) {
-    if (b.has(x)) intersection++;
-  }
-  const union = a.size + b.size - intersection;
-  return intersection / union;
-}
-
 export function clusterItems(items) {
   if (items.length === 0) return [];
 
-  const tokenList = items.map(item => tokenize(item.title || ''));
-
-  const invertedIndex = new Map();
-  for (let i = 0; i < tokenList.length; i++) {
-    for (const token of tokenList[i]) {
-      const bucket = invertedIndex.get(token);
-      if (bucket) bucket.push(i);
-      else invertedIndex.set(token, [i]);
-    }
-  }
-
-  const clusters = [];
-  const assigned = new Set();
-
-  for (let i = 0; i < items.length; i++) {
-    if (assigned.has(i)) continue;
-
-    const cluster = [i];
-    assigned.add(i);
-    const tokensI = tokenList[i];
-
-    const candidates = new Set();
-    for (const token of tokensI) {
-      const bucket = invertedIndex.get(token);
-      if (!bucket) continue;
-      for (const idx of bucket) {
-        if (idx > i) candidates.add(idx);
-      }
-    }
-
-    for (const j of Array.from(candidates).sort((a, b) => a - b)) {
-      if (assigned.has(j)) continue;
-      if (jaccardSimilarity(tokensI, tokenList[j]) >= SIMILARITY_THRESHOLD) {
-        cluster.push(j);
-        assigned.add(j);
-      }
-    }
-
-    clusters.push(cluster.map(idx => items[idx]));
-  }
+  // #4924 review (maintainability P1): delegate the clustering ALGORITHM
+  // to the shared module too, not just the similarity function — a local
+  // copy of the loop would let clustering semantics drift apart again,
+  // one layer above the drift this PR removed.
+  const clusters = clusterTexts(items.map(item => item.title || ''))
+    .map(indices => indices.map(idx => items[idx]));
 
   return clusters.map(group => {
     const sorted = [...group].sort((a, b) => {

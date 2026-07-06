@@ -36,7 +36,11 @@ message NewsItem {
   // corroborating source, capped at five sources. The final score can exceed
   // 100; with current boosts it is approximately capped at 138.
   int32 importance_score = 9;
-  // Number of distinct sources that reported the same story in this digest cycle.
+  // Number of distinct sources that reported the same story in this digest
+  // cycle. "Same story" is determined by edit-tolerant story-identity
+  // clustering (headlines describing one event with different wording,
+  // ordering, source suffixes, truncation, or morphology corroborate each
+  // other) — not exact-title matching. See shared/story-identity.js.
   int32 corroboration_count = 10;
   // Story lifecycle metadata derived from cross-cycle persistence data.
   StoryMeta story_meta = 11;
