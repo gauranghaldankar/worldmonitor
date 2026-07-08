@@ -1,5 +1,6 @@
 import { getCorsHeaders, isDisallowedOrigin } from './_cors.js';
 import { jsonResponse } from './_json-response.js';
+import { USER_API_KEY_GATEWAY_VALIDATION_ERROR, validateApiKey } from './_api-key.js';
 // Seed-envelope helper. PR 1 imports it here so PR 2 can wire envelope-aware
 // reads at specific call sites without further plumbing. It's a no-op on
 // legacy-shape seed-meta values (they have no `_seed` wrapper and pass through
@@ -10,6 +11,11 @@ import { redisPipeline, getRedisCredentials } from './_upstash-json.js';
 import { CII_RISK_SCORE_CACHE_KEYS } from './_cii-risk-cache-keys.js';
 
 export const config = { runtime: 'edge' };
+
+// Iran-events domain sunset (war ended 2026-07). Default OFF everywhere; set
+// IRAN_EVENTS_ENABLED=true to restore the whole domain. Mirrors the backend
+// *_ENABLED env idiom (server/worldmonitor/resilience/v1/_shared.ts).
+const IRAN_EVENTS_ENABLED = (process.env.IRAN_EVENTS_ENABLED ?? 'false').toLowerCase() === 'true';
 
 const BOOTSTRAP_KEYS = {
   earthquakes:       'seismology:earthquakes:v1',
@@ -107,6 +113,10 @@ const BOOTSTRAP_KEYS = {
 };
 
 const STANDALONE_KEYS = {
+  // #4920 completeness measurement (daily GH Actions publishers) — ops
+  // keys: health-monitored but NOT bootstrap-hydrated into page loads.
+  newsFeedHealth:    'news:feed-health:v1',
+  newsRecallBenchmark: 'news:recall-benchmark:v1',
   serviceStatuses:       'infra:service-statuses:v1',
   macroSignals:          'economic:macro-signals:v1',
   bisPolicy:             'economic:bis:policy:v1',
@@ -235,6 +245,8 @@ const STANDALONE_KEYS = {
   telegramFeed:                  'intelligence:telegram-feed:v1',
   digestNotifications:           'digest:last-run',
   webcams:                       'webcam:cameras:active',
+  forecastResolutions:           'forecast:resolutions:v1',
+  forecastScorecard:             'forecast:scorecard:v1',
 };
 
 const SEED_META = {
@@ -259,6 +271,9 @@ const SEED_META = {
   notamClosures:    { key: 'seed-meta:aviation:notam',          maxStaleMin: 240 }, // 2h interval; 240min = 2x interval
   predictionMarkets: { key: 'seed-meta:prediction:markets',     maxStaleMin: 90 },
   newsInsights:     { key: 'seed-meta:news:insights',           maxStaleMin: 30 },
+  // #4920: daily GH Actions cadence; 2880 = 2x — one fully missed day alarms
+  newsFeedHealth:   { key: 'seed-meta:news:feed-health',        maxStaleMin: 2880 },
+  newsRecallBenchmark: { key: 'seed-meta:news:recall-benchmark', maxStaleMin: 2880 },
   marketQuotes:     { key: 'seed-meta:market:stocks',         maxStaleMin: 30 },
   commodityQuotes:  { key: 'seed-meta:market:commodities',    maxStaleMin: 30 },
   goldExtended:     { key: 'seed-meta:market:gold-extended',  maxStaleMin: 30 },
@@ -318,6 +333,8 @@ const SEED_META = {
   telegramFeed:     { key: 'seed-meta:intelligence:telegram-feed:v1', maxStaleMin: 10 }, // 60s poll interval; 10min grace catches poll failures before they go stale in the panel
   digestNotifications: { key: 'seed-meta:digest:last-run',          maxStaleMin: 90 }, // Railway digest-notifications cron runs every 30min; 90 = 3x cadence and detects a dead cron before daily digests are missed.
   forecasts:        { key: 'seed-meta:forecast:predictions',       maxStaleMin: 90 },
+  forecastResolutions: { key: 'seed-meta:forecast:resolutions',     maxStaleMin: 2160 }, // daily Bet-2 resolver; 36h catches a missed cron without flapping on normal daily jitter
+  forecastScorecard:   { key: 'seed-meta:forecast:scorecard',       maxStaleMin: 2160 }, // scorecard extra key written by seed-forecast-resolutions
   sectors:          { key: 'seed-meta:market:sectors',             maxStaleMin: 30 },
   techReadiness:    { key: 'seed-meta:economic:worldbank-techreadiness:v1', maxStaleMin: 10080 },
   progressData:     { key: 'seed-meta:economic:worldbank-progress:v1',     maxStaleMin: 10080 },
@@ -452,6 +469,14 @@ const SEED_META = {
   webcams:                 { key: 'seed-meta:webcam:cameras:geo',                   maxStaleMin: 1440 }, // seed-webcams writes 24h geo/meta keys plus a 30h active pointer; stale at 24h before the layer goes blank.
 };
 
+// Iran-events sunset: when disabled (default), drop it from all health
+// classification so the deliberately-dormant manual seed can't raise
+// STALE_SEED (present-but-stale) or EMPTY (absent). Re-enabling restores both.
+if (!IRAN_EVENTS_ENABLED) {
+  delete BOOTSTRAP_KEYS.iranEvents;
+  delete SEED_META.iranEvents;
+}
+
 // Standalone keys that are populated on-demand by RPC handlers (not seeds).
 // Empty = WARN not CRIT since they only exist after first request.
 //
@@ -485,6 +510,14 @@ const ON_DEMAND_KEYS = new Set([
   // chronic LLM-provider failures must surface as CRIT.
   'simulationPackageLatest', // written by writeSimulationPackage after deep forecast runs; only present after first successful deep run
   'simulationOutcomeLatest', // written by writeSimulationOutcome after simulation runs; only present after first successful simulation
+  // #4927 review P1: activation-gated on the operator adding UPSTASH_* as GH
+  // Actions secrets — the publishers skip silently without them, so a
+  // never-activated key must read as soft EMPTY_ON_DEMAND, not EMPTY/CRIT,
+  // while the workflow stays green. On-demand softening is REVOKED once the
+  // durable activation marker exists (see ACTIVATION_MARKERS): after the
+  // first publish, missing data/meta is EMPTY/STALE_SEED like any other key.
+  'newsFeedHealth',
+  'newsRecallBenchmark',
   'newsThreatSummary', // relay classify loop — only written when mergedByCountry has entries; absent on quiet news periods
   'resilienceRanking', // on-demand RPC cache populated after ranking requests; missing before first Pro use is expected
   'recoveryFiscalSpace', 'recoveryReserveAdequacy', 'recoveryExternalDebt',
@@ -536,6 +569,17 @@ const ON_DEMAND_KEYS = new Set([
 // even when the data key has strlen=0. For producer-specific cases where the
 // payload must exist but recordCount=0 is valid, add to ZERO_RECORD_DATA_OK_KEYS
 // only.
+// #4927 re-review P1: "has ever published" must survive the 7d seed-meta
+// TTL — inferring activation from meta existence meant a publisher that ran
+// once and died read as healthy pending-activation again after the meta
+// expired. Publishers SET these markers with NO TTL on every successful
+// publish; when the marker exists the key leaves ON_DEMAND softening and
+// normal EMPTY/STALE_SEED rules apply.
+const ACTIVATION_MARKERS = {
+  newsFeedHealth: 'seed-activated:news:feed-health',
+  newsRecallBenchmark: 'seed-activated:news:recall-benchmark',
+};
+
 const EMPTY_DATA_OK_KEYS = new Set([
   'notamClosures', 'faaDelays', 'intlDelays', 'gpsjam', 'positiveGeoEvents', 'weatherAlerts',
   'earningsCalendar', 'econCalendar', 'cotPositioning',
@@ -674,7 +718,8 @@ function isCascadeCovered(name, hasData, keyStrens, keyErrors) {
 function classifyKey(name, redisKey, opts, ctx) {
   const { keyStrens, keyErrors, keyMetaValues, keyMetaErrors, now } = ctx;
   const seedCfg = SEED_META[name];
-  const isOnDemand = !!opts.allowOnDemand && ON_DEMAND_KEYS.has(name);
+  const isOnDemand = !!opts.allowOnDemand && ON_DEMAND_KEYS.has(name)
+    && !(ctx.activatedNames && ctx.activatedNames.has(name));
 
   const meta = readSeedMeta(seedCfg, keyMetaValues, keyMetaErrors, now);
 
@@ -777,6 +822,38 @@ export default async function handler(req, ctx) {
     return new Response(null, { status: 204, headers });
   }
 
+  const url = new URL(req.url);
+  const compact = url.searchParams.get('compact') === '1';
+  const wantsHistory = url.searchParams.get('history') === '1';
+
+  if (!compact || wantsHistory) {
+    const keyCheck = await validateApiKey(req, { forceKey: true });
+    if (keyCheck.required && !keyCheck.valid) {
+      const error = keyCheck.error === USER_API_KEY_GATEWAY_VALIDATION_ERROR
+        ? 'Invalid API key'
+        : keyCheck.error;
+      // RFC 7235 §3.1 requires WWW-Authenticate on every 401. The challenge
+      // must reflect what this gate actually accepts: validateApiKey reads the
+      // X-WorldMonitor-Key / X-Api-Key headers (or tester cookies) — never
+      // Authorization: Bearer — so advertising a Bearer/OAuth challenge here
+      // sent agents down a flow that cannot succeed (post-#4867 review). The
+      // hint exists because this URL is what old copies of the api-catalog
+      // linkset advertised as the public status endpoint (#4856) — a keyless
+      // caller landing here should learn the public form, not dead-end.
+      return jsonResponse(
+        {
+          error,
+          hint: 'Detailed health requires an operator/enterprise API key. Public status: /api/health?compact=1',
+        },
+        401,
+        {
+          ...headers,
+          'WWW-Authenticate': 'ApiKey realm="worldmonitor-health", header="X-WorldMonitor-Key"',
+        }
+      );
+    }
+  }
+
   // ?history=1 — fast read of the failure-log persisted by previous /api/health
   // probes. Skips the full freshness check (which is expensive — fetches every
   // bootstrap key) and returns only the last-failure snapshot + the deduped
@@ -786,31 +863,28 @@ export default async function handler(req, ctx) {
   //   health:failure-log    — last 50 deduped incidents (7-day TTL)
   // See WM 2026-05-10 — added after a night of UptimeRobot flips that needed
   // direct Upstash inspection to diagnose.
-  {
-    const earlyUrl = new URL(req.url);
-    if (earlyUrl.searchParams.get('history') === '1') {
-      const results = await redisPipeline(
-        [
-          ['GET', 'health:last-failure'],
-          ['LRANGE', 'health:failure-log', '0', '-1'],
-        ],
-        4_000,
-      );
-      const parseJson = (raw) => {
-        if (typeof raw !== 'string') return null;
-        try { return JSON.parse(raw); } catch { return null; }
-      };
-      const lastFailureRaw = results?.[0]?.result;
-      const failureLogRaw = results?.[1]?.result;
-      const body = {
-        lastFailure: parseJson(lastFailureRaw),
-        failureLog: Array.isArray(failureLogRaw)
-          ? failureLogRaw.map(parseJson).filter((e) => e !== null)
-          : [],
-        checkedAt: new Date().toISOString(),
-      };
-      return new Response(JSON.stringify(body, null, 2), { status: 200, headers });
-    }
+  if (wantsHistory) {
+    const results = await redisPipeline(
+      [
+        ['GET', 'health:last-failure'],
+        ['LRANGE', 'health:failure-log', '0', '-1'],
+      ],
+      4_000,
+    );
+    const parseJson = (raw) => {
+      if (typeof raw !== 'string') return null;
+      try { return JSON.parse(raw); } catch { return null; }
+    };
+    const lastFailureRaw = results?.[0]?.result;
+    const failureLogRaw = results?.[1]?.result;
+    const body = {
+      lastFailure: parseJson(lastFailureRaw),
+      failureLog: Array.isArray(failureLogRaw)
+        ? failureLogRaw.map(parseJson).filter((e) => e !== null)
+        : [],
+      checkedAt: new Date().toISOString(),
+    };
+    return new Response(JSON.stringify(body, null, 2), { status: 200, headers });
   }
 
   const now = Date.now();
@@ -820,6 +894,7 @@ export default async function handler(req, ctx) {
     ...Object.values(STANDALONE_KEYS),
   ];
   const allMetaKeys = Object.values(SEED_META).map(s => s.key);
+  const activationEntries = Object.entries(ACTIVATION_MARKERS);
 
   // STRLEN for data keys avoids loading large blobs into memory (OOM prevention).
   // NEG_SENTINEL ('__WM_NEG__') is 10 bytes — strlenIsData() rejects exactly
@@ -829,6 +904,7 @@ export default async function handler(req, ctx) {
     const commands = [
       ...allDataKeys.map(k => ['STRLEN', k]),
       ...allMetaKeys.map(k => ['GET', k]),
+      ...activationEntries.map(([, marker]) => ['EXISTS', marker]),
     ];
     if (!getRedisCredentials()) throw new Error('Redis not configured');
     results = await redisPipeline(commands, 8_000);
@@ -865,8 +941,16 @@ export default async function handler(req, ctx) {
     if (r?.error) keyMetaErrors.set(allMetaKeys[i], r.error);
     keyMetaValues.set(allMetaKeys[i], r?.result ?? null);
   }
+  // activatedNames: keys whose durable activation marker exists — these
+  // leave ON_DEMAND softening permanently (#4927 re-review P1). A marker
+  // read error degrades to not-activated (soft), never to a false alarm.
+  const activatedNames = new Set();
+  for (let i = 0; i < activationEntries.length; i++) {
+    const r = results[allDataKeys.length + allMetaKeys.length + i];
+    if (!r?.error && Number(r?.result) === 1) activatedNames.add(activationEntries[i][0]);
+  }
 
-  const classifyCtx = { keyStrens, keyErrors, keyMetaValues, keyMetaErrors, now };
+  const classifyCtx = { keyStrens, keyErrors, keyMetaValues, keyMetaErrors, activatedNames, now };
   const checks = {};
   const counts = { ok: 0, warn: 0, onDemandWarn: 0, staleContent: 0, crit: 0 };
   let totalChecks = 0;
@@ -954,9 +1038,6 @@ export default async function handler(req, ctx) {
     if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(clear);
   }
 
-  const url = new URL(req.url);
-  const compact = url.searchParams.get('compact') === '1';
-
   const body = {
     status: overall,
     summary: {
@@ -985,9 +1066,34 @@ export default async function handler(req, ctx) {
     if (Object.keys(problems).length > 0) body.problems = problems;
   }
 
+  // Compact is the public keyless form polled by external uptime MONITORS, so it
+  // must NEVER be edge-cached: the prior `s-maxage=60` (#4907, to collapse
+  // dashboard-tab polling) let a shared CDN entry pin a stale WARNING that kept
+  // UptimeRobot reading "down" long AFTER the seed recovered (2026-07-07 — the
+  // literal `?cb=*cachebuster*` was a constant, so it never busted the entry).
+  // no-store guarantees a monitor sees live recovery on its very next poll. The
+  // origin cost is one 196-key Redis pipeline per request — cheap — so losing
+  // the per-tab poll-collapse is a non-issue. All other responses already carry
+  // the no-store defaults from `headers` (a cached 401 pins an auth failure; a
+  // cached 503 masks REDIS_DOWN recovery).
+  let responseHeaders = headers;
+  if (compact) {
+    const { 'CF-Cache-Status': _bypassMarker, ...base } = headers;
+    responseHeaders = {
+      ...base,
+      // no-store so no CDN or browser ever serves a stale health verdict to a
+      // monitor. Deliberately NOT `public` — `public, no-store` is a
+      // self-contradictory signal (RFC 9111 §5.2.2.5: no-store wins, but a
+      // non-compliant proxy could read `public` as permission to cache — the
+      // exact bug class this closes).
+      'Cache-Control': 'no-store, max-age=0',
+      'CDN-Cache-Control': 'no-store',
+    };
+  }
+
   return new Response(JSON.stringify(body, null, compact ? 0 : 2), {
     status: httpStatus,
-    headers,
+    headers: responseHeaders,
   });
 }
 
@@ -998,10 +1104,12 @@ export default async function handler(req, ctx) {
 export const __testing__ = {
   readSeedMeta,
   classifyKey,
+  ACTIVATION_MARKERS,
   STATUS_COUNTS,
   // U7 (Tier 3 parity test): exposed for tests/mcp-bootstrap-parity.test.mjs
   // to walk the canonical seeded-data inventory. Both consts are unexported
   // at module scope by design — this is the test-only escape hatch.
   BOOTSTRAP_KEYS,
   STANDALONE_KEYS,
+  SEED_META,
 };

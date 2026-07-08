@@ -486,7 +486,9 @@
         "space": "ESPAÇO"
       },
       "paused": "Webcams em pausa",
-      "pausedIdle": "Webcams em pausa — mova o rato para retomar"
+      "pausedIdle": "Webcams em pausa — mova o rato para retomar",
+      "play": "Reproduzir",
+      "previewStatus": "Prévia ao vivo"
     },
     "playback": {
       "live": "Live",
@@ -1229,8 +1231,8 @@
       "badgeAnimDesc": "Animar emblemas de atualização nos cabeçalhos dos painéis",
       "headlineMemoryLabel": "Memória de manchetes",
       "headlineMemoryDesc": "Lembrar manchetes vistas para destacar novas",
-      "streamAlwaysOnLabel": "Manter transmissões ao vivo ativas",
-      "streamAlwaysOnDesc": "Impede que Live Cams e Live News pausem automaticamente quando você está inativo. Recomendado para uso em segundo monitor / painel de parede. Desative (Eco) para economizar CPU/largura de banda.",
+      "streamAlwaysOnLabel": "Reproduzir transmissões ao vivo automaticamente no painel",
+      "streamAlwaysOnDesc": "Inicia Live News e Live Webcams automaticamente quando estiverem visíveis. Deixe desativado para carregar vídeo apenas depois de clicar em Reproduzir.",
       "globeRenderScaleOptions": {
         "1": "Eco (1x)",
         "2": "4K (2x)",
@@ -1273,7 +1275,10 @@
       "overall": "Geral: {{tone}}",
       "signalTypesEvents": "{{types}} tipos de sinal • {{events}} eventos",
       "newsSignals": "{{news}} notícias • {{signals}} sinais",
-      "sources_many": "{{count}} fontes"
+      "sources_many": "{{count}} fontes",
+      "provenanceTitle": "Proveniência de cobertura: quantas histórias ingeridas e fontes distintas foram selecionadas para este resumo",
+      "compiledFrom": "Compilado de {{stories}} histórias em {{sources}} fontes",
+      "briefFreshness": "Gerado há {{minutes}}m · fonte mais recente com {{hours}}h"
     },
     "techHubs": {
       "infoTooltip": "<strong>Atividade do Tech Hub</strong><br>Mostra os hubs de tecnologia com mais atividade de notícias.<br><br><em>Níveis de atividade:</em><br>• <span style=\"color: {{highColor}}\">Alto</span> — Notícias de última hora ou pontuação acima de 50<br>• <span style=\"color: {{elevatedColor}}\">Elevado</span> — Pontuação 20-49<br>• <span style=\"color: {{lowColor}}\">Baixo</span> — Pontuação abaixo de 20<br><br>Clique em um hub para ampliar sua localização."
@@ -1444,7 +1449,9 @@
       "verifying": "Verificando…",
       "noResults": "Nenhum canal encontrado para \"{{term}}\"",
       "hlsUrl": "URL de transmissão HLS (opcional)",
-      "invalidHlsUrl": "Introduza um URL de transmissão HLS válido (.m3u8)"
+      "invalidHlsUrl": "Introduza um URL de transmissão HLS válido (.m3u8)",
+      "playLiveFeed": "Reproduzir feed ao vivo",
+      "readyStatus": "Pronto quando você estiver"
     },
     "securityAdvisories": {
       "loading": "Carregando alertas de viagem...",
@@ -3152,5 +3159,18 @@
     "or": "ou insira um servidor personalizado",
     "generatingVisualization": "Construindo visualização...",
     "visualizationFailed": "Falha na visualização"
+  },
+  "dashboardTabs": {
+    "ariaLabel": "Dashboard tabs",
+    "defaultName": "Main",
+    "newTabName": "New Tab",
+    "newTabCreated": "New tab created",
+    "tabDeleted": "Tab \"{{name}}\" deleted",
+    "addTab": "Add tab",
+    "addTabTitle": "New tab (starts with the default panels)",
+    "renameHint": "{{name}} — double-click to rename",
+    "deleteTab": "Delete tab",
+    "deleteTabAria": "Delete tab {{name}}",
+    "tabNameAria": "Tab name"
   }
 }

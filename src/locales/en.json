@@ -751,6 +751,8 @@
     "webcams": {
       "paused": "Webcams paused",
       "pausedIdle": "Webcams paused — move mouse to resume",
+      "play": "Play",
+      "previewStatus": "Live preview",
       "regions": {
         "all": "ALL",
         "mideast": "MIDEAST",
@@ -1413,8 +1415,8 @@
       "analysisFrameworksFromAgentskills": "From agentskills.io",
       "analysisFrameworksPasteJson": "Paste JSON",
       "analysisFrameworksSaveToLibrary": "Save to Library",
-      "streamAlwaysOnLabel": "Keep live streams running",
-      "streamAlwaysOnDesc": "Prevents Live Cams and Live News from auto-pausing when you are idle. Recommended for second-monitor / wallboard usage. Disable (Eco) to save CPU/bandwidth.",
+      "streamAlwaysOnLabel": "Auto-play live streams on dashboard",
+      "streamAlwaysOnDesc": "Starts Live News and Live Webcams automatically when visible. Leave off to load video only after you click Play.",
       "frameworkNote": "Applies to client-generated analysis only",
       "loadingServerInsights": "Loading server insights...",
       "usingCachedBrief": "Using cached brief...",
@@ -1440,7 +1442,10 @@
       "tonePositive": "Positive",
       "overall": "Overall: {{tone}}",
       "signalTypesEvents": "{{types}} signal types • {{events}} events",
-      "newsSignals": "{{news}} news • {{signals}} signals"
+      "newsSignals": "{{news}} news • {{signals}} signals",
+      "compiledFrom": "Compiled from {{stories}} stories across {{sources}} sources",
+      "provenanceTitle": "Coverage provenance: how many ingested stories and distinct sources this brief was selected from",
+      "briefFreshness": "Generated {{minutes}}m ago · newest source {{hours}}h old"
     },
     "settings": {
       "exportSettings": "Export Settings",
@@ -1977,6 +1982,8 @@
       "botCheck": "YouTube is requesting sign-in to play {{name}}",
       "signInToYouTube": "Sign in to YouTube",
       "openOnYouTube": "Open on YouTube",
+      "playLiveFeed": "Play live feed",
+      "readyStatus": "Ready when you are",
       "manage": "Manage channels",
       "addChannel": "Add channel",
       "remove": "Remove",
@@ -2447,9 +2454,9 @@
     },
     "gpsJamming": {
       "title": "GPS/GNSS Interference",
-      "navPerformance": "Nav Performance",
-      "samples": "ADS-B Samples",
-      "aircraft": "Aircraft",
+      "navPerformance": "Aircraft Affected",
+      "samples": "Affected Count",
+      "aircraft": "Aircraft Seen",
       "h3Hex": "H3 Hex"
     },
     "flight": {
@@ -3136,5 +3143,18 @@
     "or": "or enter a custom server",
     "generatingVisualization": "Building visualization...",
     "visualizationFailed": "Visualization failed"
+  },
+  "dashboardTabs": {
+    "ariaLabel": "Dashboard tabs",
+    "defaultName": "Main",
+    "newTabName": "New Tab",
+    "newTabCreated": "New tab created",
+    "tabDeleted": "Tab \"{{name}}\" deleted",
+    "addTab": "Add tab",
+    "addTabTitle": "New tab (starts with the default panels)",
+    "renameHint": "{{name}} — double-click to rename",
+    "deleteTab": "Delete tab",
+    "deleteTabAria": "Delete tab {{name}}",
+    "tabNameAria": "Tab name"
   }
 }

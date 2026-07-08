@@ -242,6 +242,14 @@ describe('air quality main graceful failure behavior', () => {
     const preloadPath = join(tempDir, 'preload.mjs');
     const redisUrl = 'https://fake-upstash.local';
     writeFileSync(preloadPath, `
+// Collapse withRetry's exponential backoff sleeps (1s+2s per exhausted OpenAQ
+// page) so the graceful-failure path runs without the wall-clock wait. Retry
+// counts, the exit code, TTL extension, and log lines are unchanged — only the
+// dead time between retries. AbortSignal.timeout uses a separate timer and is
+// untouched. The child runs the script directly (no test framework), so
+// overriding the global timer here is side-effect free.
+const __origSetTimeout = globalThis.setTimeout;
+globalThis.setTimeout = (fn, ms, ...rest) => __origSetTimeout(fn, typeof ms === 'number' && ms > 25 ? 0 : ms, ...rest);
 process.env.UPSTASH_REDIS_REST_URL = ${JSON.stringify(redisUrl)};
 process.env.UPSTASH_REDIS_REST_TOKEN = 'fake-token';
 process.env.OPENAQ_API_KEY = 'fake-openaq-key';
@@ -288,6 +296,98 @@ globalThis.fetch = async (url, init = {}) => {
       assert.match(combined, /FETCH FAILED: forced OpenAQ outage/);
       assert.match(combined, /Extended TTL on 4 key\(s\)/);
       assert.match(combined, /=== Failed gracefully \(/);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('air quality redis publish resilience', () => {
+  it('retries a transient Redis publish timeout instead of failing the bundle', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'wm-air-quality-publish-'));
+    const preloadPath = join(tempDir, 'preload.mjs');
+    const redisUrl = 'https://fake-upstash.local';
+    writeFileSync(preloadPath, `
+// Collapse withRetry's exponential backoff sleeps so the retry path runs
+// without the wall-clock wait (see the graceful-failure test above for why this
+// is side-effect free in the spawned child).
+const __origSetTimeout = globalThis.setTimeout;
+globalThis.setTimeout = (fn, ms, ...rest) => __origSetTimeout(fn, typeof ms === 'number' && ms > 25 ? 0 : ms, ...rest);
+process.env.UPSTASH_REDIS_REST_URL = ${JSON.stringify(redisUrl)};
+process.env.UPSTASH_REDIS_REST_TOKEN = 'fake-token';
+process.env.OPENAQ_API_KEY = 'fake-openaq-key';
+delete process.env.WAQI_API_KEY;
+
+let pipelineCalls = 0;
+globalThis.fetch = async (url, init = {}) => {
+  const href = String(url);
+  // OpenAQ fetch succeeds with a single fresh PM2.5 station so the seed reaches
+  // the publish step.
+  if (href.startsWith('https://api.openaq.org/v3/locations')) {
+    return new Response(JSON.stringify({
+      meta: { found: 1, limit: 1000 },
+      results: [{ id: 101, locality: 'Delhi', country: { code: 'IN' }, coordinates: { latitude: 28.61, longitude: 77.21 } }],
+    }), { status: 200 });
+  }
+  if (href.startsWith('https://api.openaq.org/v3/parameters/2/latest')) {
+    return new Response(JSON.stringify({
+      meta: { found: 1, limit: 1000 },
+      results: [{
+        locationsId: 101,
+        value: 82.4,
+        datetime: { utc: new Date(Date.now() - (10 * 60 * 1000)).toISOString() },
+        coordinates: { latitude: 28.61, longitude: 77.21 },
+        parameter: { name: 'pm25' },
+      }],
+    }), { status: 200 });
+  }
+  // The mirror publish: abort with a timeout on the first attempt (the exact
+  // failure that turned the bundle red), then succeed on the retry.
+  if (href === ${JSON.stringify(`${redisUrl}/pipeline`)}) {
+    pipelineCalls += 1;
+    if (pipelineCalls === 1) {
+      throw new Error('The operation was aborted due to timeout');
+    }
+    const commands = init.body ? JSON.parse(init.body) : [];
+    return new Response(JSON.stringify(commands.map(() => ({ result: 'OK' }))), { status: 200 });
+  }
+  // Lock acquire/release (single-command REST endpoint).
+  if (href === ${JSON.stringify(redisUrl)}) {
+    return new Response(JSON.stringify({ result: 'OK' }), { status: 200 });
+  }
+  // Verification read.
+  if (href.startsWith(${JSON.stringify(`${redisUrl}/get/`)})) {
+    return new Response(JSON.stringify({ result: JSON.stringify({ stations: [{}], fetchedAt: 1 }) }), { status: 200 });
+  }
+  return new Response(JSON.stringify({ result: null }), { status: 200 });
+};
+`);
+
+    try {
+      const scriptPath = fileURLToPath(new URL('../scripts/seed-health-air-quality.mjs', import.meta.url));
+      const result = await new Promise((resolve) => {
+        const child = spawn(process.execPath, ['--import', preloadPath, scriptPath], {
+          env: {
+            ...process.env,
+            UPSTASH_REDIS_REST_URL: redisUrl,
+            UPSTASH_REDIS_REST_TOKEN: 'fake-token',
+            OPENAQ_API_KEY: 'fake-openaq-key',
+            WAQI_API_KEY: '',
+          },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', (chunk) => { stdout += chunk; });
+        child.stderr.on('data', (chunk) => { stderr += chunk; });
+        child.on('close', (code) => resolve({ code, stdout, stderr }));
+      });
+
+      const combined = result.stdout + result.stderr;
+      assert.equal(result.code, 0);
+      assert.match(combined, /Retry 1\/2 in \d+ms: The operation was aborted due to timeout/);
+      assert.match(combined, /=== Done \(/);
+      assert.doesNotMatch(combined, /FATAL:/);
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

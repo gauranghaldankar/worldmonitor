@@ -45,6 +45,73 @@ interface DodoPaymentData {
   currency?: string;
   subscription_id?: string;
   metadata?: Record<string, string>;
+  // Dodo's payment IntentStatus (succeeded | failed | cancelled | processing |
+  // requires_customer_action | …). On `payment.processing` this is where the
+  // 3DS/SCA-pending state is surfaced. See derivePaymentEventStatus.
+  status?: string;
+}
+
+// The payment/refund webhook event types we route to handlePaymentOrRefundEvent
+// — kept in sync with the case group in webhookMutations.ts. Two drift guards,
+// with DIFFERENT enforcement (the call site casts `eventType as
+// RoutedPaymentEvent`, so cross-file drift is not type-checked):
+//   • Intra-file: omit a `case` for a union member below and the `never`
+//     default fails to COMPILE — this file's exhaustiveness guarantee.
+//   • Cross-file: a NEW webhookMutations.ts case not added to this union is NOT
+//     a compile error (the cast launders it); it is caught at RUNTIME by the
+//     `never`-default throw — loud, never a silent succeeded/failed mislabel.
+//
+// IMPORTANT: `payment.requires_customer_action` is NOT a Dodo webhook event
+// type. Dodo's payment event types are succeeded | failed | processing |
+// cancelled (SDK `WebhookEventType`); the 3DS/SCA-pending state is delivered as
+// a `payment.processing` event whose payload `data.status` (IntentStatus) is
+// `requires_customer_action`.
+type RoutedPaymentEvent =
+  | "payment.succeeded"
+  | "payment.failed"
+  | "payment.processing"
+  | "payment.cancelled"
+  | "refund.succeeded"
+  | "refund.failed";
+
+type PaymentEventStatusValue =
+  | "succeeded"
+  | "failed"
+  | "processing"
+  | "requires_customer_action"
+  | "cancelled";
+
+// Derives the persisted `paymentEvents.status` from the event type and, for the
+// non-terminal `payment.processing` event, the payload IntentStatus — that is
+// where Dodo surfaces the 3DS/SCA-pending `requires_customer_action` state
+// (#4436). Throws on an unrouted event rather than silently mislabeling it.
+function derivePaymentEventStatus(
+  eventType: RoutedPaymentEvent,
+  data: DodoPaymentData,
+): PaymentEventStatusValue {
+  switch (eventType) {
+    case "payment.succeeded":
+    case "refund.succeeded":
+      return "succeeded";
+    case "payment.failed":
+    case "refund.failed":
+      return "failed";
+    case "payment.cancelled":
+      return "cancelled";
+    case "payment.processing":
+      // Plain in-flight vs. 3DS/SCA-pending. Other non-terminal IntentStatus
+      // values (requires_payment_method, etc.) collapse to `processing` — never
+      // to a terminal succeeded/failed.
+      return data.status === "requires_customer_action"
+        ? "requires_customer_action"
+        : "processing";
+    default: {
+      const _exhaustive: never = eventType;
+      throw new Error(
+        `[webhook] derivePaymentEventStatus: unrouted event ${String(_exhaustive)}`,
+      );
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -129,12 +196,15 @@ export async function upsertEntitlements(
 // Coverage helpers
 // ---------------------------------------------------------------------------
 
+/** The local `subscriptions.status` union (mirrors `subscriptionStatus` in schema.ts). */
+export type SubscriptionStatus = "active" | "on_hold" | "cancelled" | "expired";
+
 type SubscriptionRow = {
   _id: import("../_generated/dataModel").Id<"subscriptions">;
   userId: string;
   dodoSubscriptionId: string;
   planKey: string;
-  status: "active" | "on_hold" | "cancelled" | "expired";
+  status: SubscriptionStatus;
   currentPeriodEnd: number;
 };
 
@@ -299,7 +369,7 @@ const FALLBACK_PLAN_KEY = "enterprise";
  * runs on a schedule and detects "Dodo has products our catalog doesn't"
  * BEFORE a webhook arrives, so most cases are caught proactively.
  */
-async function resolvePlanKey(
+export async function resolvePlanKey(
   ctx: MutationCtx,
   dodoProductId: string,
 ): Promise<string> {
@@ -496,6 +566,13 @@ export async function handleSubscriptionActive(
       dodoCustomerId: incomingDodoCustomerId ?? existing.dodoCustomerId,
       rawPayload: data,
       updatedAt: eventTimestamp,
+      // A live webhook proves the sub exists and (re)activates it — clear the
+      // renewal-reconciliation bookkeeping so a future stale episode starts
+      // from a clean slate (esp. the consecutive-404 streak). See
+      // payments/billing:reconcileMissedDodoRenewals.
+      lastReconcileAttemptAt: undefined,
+      reconcileFailureCount: undefined,
+      reconcileNotFoundCount: undefined,
     });
   } else {
     await ctx.db.insert("subscriptions", {
@@ -646,6 +723,12 @@ export async function handleSubscriptionRenewed(
     dodoCustomerId: mergeDodoCustomerId(data, existing),
     rawPayload: data,
     updatedAt: eventTimestamp,
+    // Renewal proves the sub exists — clear renewal-reconciliation bookkeeping
+    // so a future stale episode starts from a clean slate (esp. the
+    // consecutive-404 streak). See payments/billing:reconcileMissedDodoRenewals.
+    lastReconcileAttemptAt: undefined,
+    reconcileFailureCount: undefined,
+    reconcileNotFoundCount: undefined,
   });
 
   // Recompute from ALL subs — a renewal on a lower-tier sub must NOT
@@ -679,8 +762,21 @@ export async function handleSubscriptionOnHold(
 
   if (!isNewerEvent(existing.updatedAt, eventTimestamp)) return;
 
+  // Episode anchor (#4932): only the transition INTO on_hold opens a new
+  // dunning episode. Repeated on_hold webhooks (Dodo payment-retry failures,
+  // replays) keep the original anchor so the day-3/day-7 clock doesn't reset
+  // and the day-0 email isn't re-sent. For pre-#4932 rows already on_hold
+  // with no onHoldAt, the fallback MUST be the pre-patch updatedAt — that is
+  // exactly what runDunningScan uses as their episode key, so the ledger
+  // dedup stays consistent. Falling back to eventTimestamp would move the
+  // anchor on every repeat webhook and re-open the finished sequence
+  // (duplicate day-3/day-7 sends — PR #4935 review finding 1).
+  const enteringHold = existing.status !== "on_hold";
+  const onHoldAt = enteringHold ? eventTimestamp : (existing.onHoldAt ?? existing.updatedAt);
+
   await ctx.db.patch(existing._id, {
     status: "on_hold",
+    onHoldAt,
     dodoCustomerId: mergeDodoCustomerId(data, existing),
     rawPayload: data,
     updatedAt: eventTimestamp,
@@ -690,6 +786,22 @@ export async function handleSubscriptionOnHold(
     `[subscriptionHelpers] Subscription ${data.subscription_id} on hold -- payment failure`,
   );
   // Do NOT revoke entitlements -- they remain valid until currentPeriodEnd
+
+  // Day-0 dunning email (#4932), same non-blocking scheduler pattern as the
+  // welcome email. The action re-validates state (still on_hold, same
+  // episode, not suppressed, not already sent) before sending, so scheduling
+  // here is safe even if a recovery webhook lands in between.
+  if (enteringHold && process.env.RESEND_API_KEY) {
+    await ctx.scheduler.runAfter(
+      0,
+      internal.payments.subscriptionEmails.sendDunningEmail,
+      {
+        dodoSubscriptionId: data.subscription_id,
+        step: "dunning_day0",
+        episodeAt: onHoldAt,
+      },
+    );
+  }
 }
 
 /**
@@ -718,9 +830,21 @@ export async function handleSubscriptionCancelled(
 
   if (!isNewerEvent(existing.updatedAt, eventTimestamp)) return;
 
-  const cancelledAt = data.cancelled_at
+  // Episode anchor (#4932, PR #4935 review round 4): only the transition
+  // INTO cancelled opens a new cancellation episode. Repeat cancellation-
+  // flavored events (`subscription.updated` with status="cancelled" routes
+  // here too, often WITHOUT a stable cancelled_at) must not move the
+  // anchor — the winback ledger is keyed on it, so a moved anchor reopens
+  // the one-shot winback and emails the same cancellation twice. A real
+  // new episode (cancelled → active → cancelled) passes through a
+  // non-cancelled status first, so enteringCancelled correctly re-anchors.
+  const enteringCancelled = existing.status !== "cancelled";
+  const eventCancelledAt = data.cancelled_at
     ? toEpochMs(data.cancelled_at, "cancelled_at", eventTimestamp)
     : eventTimestamp;
+  const cancelledAt = enteringCancelled
+    ? eventCancelledAt
+    : (existing.cancelledAt ?? eventCancelledAt);
 
   await ctx.db.patch(existing._id, {
     status: "cancelled",
@@ -896,7 +1020,14 @@ export async function handlePaymentOrRefundEvent(
   );
 
   const type = eventType.startsWith("refund.") ? "refund" : "charge";
-  const status = eventType.endsWith(".succeeded") ? "succeeded" : "failed";
+  // Non-terminal payment states (processing, requires_customer_action / 3DS-SCA)
+  // are persisted so the app has a pending-payment signal for duplicate-
+  // prevention (#4438) and reconciliation (#4439); `cancelled` is terminal-but-
+  // uncharged. The prior binary `endsWith(".succeeded") ? … : "failed"`
+  // mislabeled every one of these as a failed charge. The cast is safe: every
+  // caller is gated by the webhook switch's routed-event cases, and an
+  // unexpected value throws (loudly) in derivePaymentEventStatus.
+  const status = derivePaymentEventStatus(eventType as RoutedPaymentEvent, data);
 
   await ctx.db.insert("paymentEvents", {
     userId,
@@ -906,6 +1037,11 @@ export async function handlePaymentOrRefundEvent(
     currency: data.currency ?? "USD",
     status,
     dodoSubscriptionId: data.subscription_id ?? undefined,
+    // Carried from the checkout-session metadata bridge (set in
+    // convex/payments/checkout.ts). Lets the duplicate-payment guard resolve a
+    // pending row to its tierGroup (#4438). Undefined for sessions created
+    // before the bridge shipped or events that drop session metadata.
+    planKey: data.metadata?.wm_plan_key,
     rawPayload: data,
     occurredAt: eventTimestamp,
   });

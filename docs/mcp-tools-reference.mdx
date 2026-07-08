@@ -3,7 +3,7 @@ title: "MCP Tools Reference"
 description: "Per-tool reference for every MCP tool exposed by WorldMonitor — parameters, freshness, API endpoints, and example calls."
 ---
 
-Complete reference for every MCP tool. Use this alongside the [MCP Server overview](/mcp-server) (connection, auth, plans, errors).
+Complete reference for every MCP tool. Use this alongside the [MCP Server overview](/mcp-overview) (connection, auth, plans, errors).
 
 Every tool returns the standard MCP content-block format:
 
@@ -16,7 +16,7 @@ Cache-backed tools (the majority) include `cached_at` (ISO timestamp) and `stale
 The `curl` examples below all assume you've exported your API key:
 
 ```bash
-export WM_KEY="wm_0123456789abcdef0123456789abcdef01234567"  # or use the OAuth bearer token instead — see /mcp-server#authentication
+export WM_KEY="wm_0123456789abcdef0123456789abcdef01234567"  # or use the OAuth bearer token instead — see /mcp-overview#authentication
 ```
 
 If you've completed the OAuth flow instead, replace `-H "X-WorldMonitor-Key: $WM_KEY"` with `-H "Authorization: Bearer $TOKEN"` in each example.
@@ -27,7 +27,7 @@ If you've completed the OAuth flow instead, replace `-H "X-WorldMonitor-Key: $WM
 
 ## Discovering tools
 
-Before diving into the per-tool reference, two affordances make discovery cheaper than reading this page top-to-bottom.
+Before diving into the per-tool reference, two affordances make discovery cheaper than reading this page top-to-bottom. If you are starting from a REST route instead of a tool name, use the [API coverage table](/mcp-overview#api-coverage); per-tool **API endpoints** lines mean exact `_apiPaths` declarations, while `none directly` means the tool returns data without claiming an equivalent REST route.
 
 ### `describe_tool` — full uncompressed definition on demand
 
@@ -1341,6 +1341,31 @@ curl -s https://worldmonitor.app/mcp \
     "jsonrpc":"2.0","id":1,
     "method":"tools/call",
     "params":{"name":"get_forecast_predictions","arguments":{}}
+  }'
+```
+
+</CodeGroup>
+
+### `get_forecast_scorecard`
+
+Forecast resolution scorecard with calibration, Brier/log score, domain and generation-origin breakdowns, and pending/judged resolution counts.
+
+**Parameters (tool-specific):** none
+
+- **API endpoints:** `GET /api/forecast/v1/get-forecast-scorecard`
+- **Kind:** cache read — sub-second response from Redis bootstrap cache.
+- **Freshness budget:** up to **36 h** before `stale: true` is flagged (daily resolver cadence with missed-cron tolerance).
+
+<CodeGroup>
+
+```bash curl
+curl -s https://worldmonitor.app/mcp \
+  -H "X-WorldMonitor-Key: $WM_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "jsonrpc":"2.0","id":1,
+    "method":"tools/call",
+    "params":{"name":"get_forecast_scorecard","arguments":{}}
   }'
 ```
 

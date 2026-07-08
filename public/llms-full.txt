@@ -8,6 +8,30 @@ A single codebase produces six specialized variants — geopolitical, technology
 
 The project is built with TypeScript, Vite, MapLibre GL JS, deck.gl, D3.js, and Tauri. Browser-side clustering, local ML, and offline analysis run in the client; server-authoritative APIs publish CII/CRI scores, briefs, forecasts, MCP tools, and cached operational data with documented methodology and provenance.
 
+## When to Use World Monitor (Agent Guidance)
+
+Reach for World Monitor when a task needs live, correlated, machine-readable global-intelligence data — and you want structured JSON to reason over, not prose to re-parse. Best-fit jobs an agent should route here:
+
+- **Country situation brief** — a fresh, source-attributed strategic read on one country (geopolitics, economy, security). MCP tool `get_country_brief`; REST `GET https://api.worldmonitor.app/api/intelligence/v1/get-country-intel-brief?country_code=IR`; agent skill `fetch-country-brief`.
+- **Country risk & resilience** — the composite resilience score (0–100) with per-domain/pillar breakdown, 30-day trend, and confidence band. MCP tool `get_country_risk`; REST `GET https://api.worldmonitor.app/api/resilience/v1/get-resilience-score?countryCode=DE`; ranked list via `/api/resilience/v1/get-resilience-ranking`; agent skill `fetch-resilience-score`.
+- **"Does this event move markets?"** — check whether a conflict, sanction, or chokepoint disruption has a plausible market-transmission path. MCP tools `get_conflict_events`, `get_sanctions_data`, `get_chokepoint_status`, `get_market_data`, `get_maritime_activity`.
+- **Commodity & supply-chain disruption** — correlate physical supply signals with traded prices. MCP tools `get_supply_chain_data`, `get_energy_intelligence`, `get_commodity_geo`, `get_maritime_activity`.
+- **Live situational awareness** — the current world brief plus classified live signals. MCP tools `get_world_brief`, `get_news_intelligence`, `get_natural_disasters`, `get_cyber_threats`, `get_aviation_status`.
+- **Forecasting & prediction-market context** — generate or fetch scenario forecasts. MCP tools `generate_forecasts`, `get_forecast_predictions`, `get_prediction_markets`.
+
+**When NOT to use:** World Monitor is not a general web-search engine, a historical archive, or a trading-execution venue — it places no orders and stores no user documents. For a one-off narrative that needs no correlation across live layers, a plain LLM is cheaper and faster.
+
+**How an agent should call it:**
+
+- **MCP server (recommended):** `https://worldmonitor.app/mcp` — Streamable HTTP, 40 tools; issue `tools/list` for the live inventory. Auth: OAuth2 (`scope=mcp`) or an API key header `X-WorldMonitor-Key: wm_<40-hex>`. Server card: https://worldmonitor.app/.well-known/mcp/server-card.json · Registry entries: `app.worldmonitor/mcp` in the official MCP registry (registry.modelcontextprotocol.io) · https://smithery.ai/servers/worldmonitor/wm-mcp · https://mcp.so/server/world-monitor
+- **REST API:** base `https://api.worldmonitor.app`; OpenAPI spec at https://worldmonitor.app/openapi.yaml; same `X-WorldMonitor-Key` header.
+- **CLI:** `npx worldmonitor tools` lists every tool (public, no key); `npm install -g worldmonitor` installs the `worldmonitor` command. A zero-dependency, MCP-first client for the tools and REST API above — pass `--api-key` for data calls. https://www.npmjs.com/package/worldmonitor
+- **Agent Skills:** discovery manifest at https://worldmonitor.app/.well-known/agent-skills/index.json · install via `npx skills add koala73/worldmonitor` (https://skills.sh/koala73/worldmonitor)
+- **Keys, plans & limits:** https://worldmonitor.app/pricing.md (markdown) · live JSON catalog `GET https://www.worldmonitor.app/api/product-catalog` (public, no key) · auth matrix https://www.worldmonitor.app/docs/usage-auth · rate limits https://www.worldmonitor.app/docs/usage-rate-limits.md · issue a key at https://worldmonitor.app/pro
+- **Accounts & sign-up:** free dashboard needs NO account; Pro/API accounts are created in a browser (Clerk sign-up at https://worldmonitor.app/pro). Guide: https://www.worldmonitor.app/docs/accounts.md
+- **Support & contact:** https://worldmonitor.app/support.md — support@worldmonitor.app (general) · enterprise@worldmonitor.app (sales) · status https://status.worldmonitor.app · issues https://github.com/koala73/worldmonitor/issues
+- **User-Agent policy:** always send a descriptive `User-Agent` (e.g. `mytool/1.0 (+https://yoursite.example)`). Default HTTP-library UAs (`curl/*`, `python-requests/*`, empty/short strings) may be challenged with 403 by the edge firewall — a 403 does NOT mean the endpoint is missing; retry with a real UA before concluding anything.
+
 ## Live Instances
 
 - [World Monitor](https://worldmonitor.app): Geopolitics, military, conflicts, infrastructure — ~25 RSS categories, 44 panels, military bases, nuclear facilities, hotspots
@@ -21,6 +45,11 @@ The project is built with TypeScript, Vite, MapLibre GL JS, deck.gl, D3.js, and 
 
 - [README](https://github.com/koala73/worldmonitor/blob/main/README.md): Full project documentation with architecture details, algorithm descriptions, and data source specifications
 - [Full Documentation](https://github.com/koala73/worldmonitor/blob/main/docs/DOCUMENTATION.md): Detailed feature documentation, data layer reference, panel descriptions, and clustering logic
+- [API llms.txt](https://worldmonitor.app/api/llms.txt): API-section briefing — MCP server, REST API, CLI, auth, and per-task tool routing for the developer surface
+- [World Monitor Developer Portal](https://worldmonitor.app/developers.md): Developer resource hub linking the MCP server, OpenAPI spec, REST API, SDKs, CLI, and agent skills by name
+- [World Monitor MCP Server](https://worldmonitor.app/mcp-server.md): MCP server endpoint, 39 tools, and auth modes
+- [World Monitor OpenAPI Specification](https://worldmonitor.app/openapi.md): REST API OpenAPI 3.1 contract (openapi.yaml / openapi.json)
+- [World Monitor SDKs](https://worldmonitor.app/sdks.md): Official Python, Ruby, Go, and JavaScript client libraries
 
 ## Data Layers — Geopolitical
 
@@ -240,7 +269,7 @@ Native desktop app built with Tauri (Rust + Node.js sidecar). The sidecar mirror
 - 8 live news streams and 19 live webcams from geopolitical hotspots
 - 7-signal macro market radar with BUY/CASH verdict
 - Country brief pages with exportable intelligence dossiers (JSON, CSV, PNG)
-- Multilingual UI in 24 languages with RTL support
+- Multilingual UI in 25 languages with RTL support
 - Prediction market integration (Polymarket) with 3-tier JA3 bypass
 - Temporal baseline anomaly detection using Welford's algorithm
 - Dual-source protest tracking (ACLED + GDELT) with regime-aware scoring

@@ -3,12 +3,20 @@ import { httpAction } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { webhookHandler } from "./payments/webhookHandlers";
 import { resendWebhookHandler } from "./resendWebhookHandler";
+import { USER_PREFS_WRITE_RATE_LIMIT } from "./constants";
 
 const TRUSTED = [
   "https://worldmonitor.app",
   "*.worldmonitor.app",
   "http://localhost:3000",
 ];
+
+const EXPOSED_HEADERS = [
+  "Retry-After",
+  "X-RateLimit-Limit",
+  "X-RateLimit-Remaining",
+  "X-RateLimit-Reset",
+].join(", ");
 
 function matchOrigin(origin: string, pattern: string): boolean {
   if (pattern.startsWith("*.")) {
@@ -29,6 +37,7 @@ function corsHeaders(origin: string | null): Headers {
     headers.set("Access-Control-Allow-Origin", allowed);
     headers.set("Access-Control-Allow-Methods", "POST, OPTIONS");
     headers.set("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    headers.set("Access-Control-Expose-Headers", EXPOSED_HEADERS);
     headers.set("Access-Control-Max-Age", "86400");
   }
   return headers;
@@ -62,25 +71,46 @@ async function timingSafeEqualStrings(a: string, b: string): Promise<boolean> {
  *   - `throw new ConvexError("PRO_REQUIRED")`  → data = '"PRO_REQUIRED"' → "PRO_REQUIRED"
  *   - `throw new ConvexError({code: "X", ...})` → data = '{"code":"X",…}'  → "X"
  */
-function extractConvexErrorCode(err: unknown): string | null {
+function parseConvexErrorData(err: unknown): unknown {
   const raw = (err as { data?: unknown } | undefined)?.data;
-  if (typeof raw !== "string") {
-    if (raw && typeof raw === "object" && "code" in (raw as Record<string, unknown>)) {
-      return String((raw as Record<string, unknown>).code);
-    }
-    return null;
-  }
+  if (typeof raw !== "string") return raw ?? null;
   try {
-    const parsed = JSON.parse(raw);
-    if (typeof parsed === "string") return parsed;
-    if (parsed && typeof parsed === "object" && "code" in parsed) {
-      return String((parsed as Record<string, unknown>).code);
-    }
-    return null;
+    return JSON.parse(raw);
   } catch {
-    // Not JSON — treat the raw string as the code itself.
     return raw;
   }
+}
+
+function extractConvexErrorCode(err: unknown): string | null {
+  const parsed = parseConvexErrorData(err);
+  if (typeof parsed === "string") return parsed;
+  if (parsed && typeof parsed === "object") {
+    const data = parsed as Record<string, unknown>;
+    const code = data.code ?? data.kind;
+    if (typeof code === "string") return code;
+  }
+  return null;
+}
+
+function readConvexErrorNumber(err: unknown, field: string): number | null {
+  const parsed = parseConvexErrorData(err);
+  if (!parsed || typeof parsed !== "object") return null;
+  const value = (parsed as Record<string, unknown>)[field];
+  return typeof value === "number" ? value : null;
+}
+
+type SetPreferencesResult =
+  | { ok: true; syncVersion: number }
+  | { ok: false; reason: "CONFLICT"; actualSyncVersion: number }
+  | { ok: false; reason: "BLOB_TOO_LARGE"; size: number; max: number }
+  | { ok: false; reason: "RATE_LIMITED"; limit: number; reset: number };
+
+function setRateLimitResponseHeaders(headers: Headers, limit: number, reset: number): void {
+  const retryAfter = Math.max(1, Math.ceil((reset - Date.now()) / 1000));
+  headers.set("X-RateLimit-Limit", String(limit));
+  headers.set("X-RateLimit-Remaining", "0");
+  headers.set("X-RateLimit-Reset", String(reset));
+  headers.set("Retry-After", String(retryAfter));
 }
 
 const http = httpRouter();
@@ -108,7 +138,11 @@ http.route({
       });
     }
 
-    if (typeof body.userId !== "string" || body.userId.length === 0) {
+    if (
+      typeof body.userId !== "string" ||
+      body.userId.length === 0 ||
+      body.userId.length > 256
+    ) {
       return new Response(JSON.stringify({ error: "MISSING_USER_ID" }), {
         status: 400,
         headers: { "Content-Type": "application/json" },
@@ -185,15 +219,24 @@ http.route({
           expectedSyncVersion: body.expectedSyncVersion,
           schemaVersion: body.schemaVersion,
         },
-      )) as
-        | { ok: true; syncVersion: number }
-        | { ok: false; reason: "CONFLICT"; actualSyncVersion: number };
-      // PR 3 (post-launch-stabilization): setPreferences now returns a
-      // discriminated result for CONFLICT instead of throwing. Mirror the
-      // wire shape from api/user-prefs.ts (Vercel) so clients see the same
-      // 409 + actualSyncVersion regardless of which `/api/user-prefs` host
-      // they hit.
+      )) as SetPreferencesResult;
+      // Expected write denials return as a discriminated result so Convex can
+      // commit limiter bookkeeping and duplicate-counter cleanup. Mirror the
+      // wire shape from api/user-prefs.ts (Vercel) regardless of host.
       if (result.ok === false) {
+        if (result.reason === "BLOB_TOO_LARGE") {
+          return new Response(JSON.stringify({ error: "BLOB_TOO_LARGE" }), {
+            status: 400,
+            headers,
+          });
+        }
+        if (result.reason === "RATE_LIMITED") {
+          setRateLimitResponseHeaders(headers, result.limit, result.reset);
+          return new Response(JSON.stringify({ error: "RATE_LIMITED" }), {
+            status: 429,
+            headers,
+          });
+        }
         return new Response(
           JSON.stringify({
             error: "CONFLICT",
@@ -208,19 +251,29 @@ http.route({
       );
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
+      const code = extractConvexErrorCode(err);
       // Defensive: keep CONFLICT-throw fallback for the deploy-ordering
       // window where this http action may run against an older Convex
       // deployment that still throws. Once both layers have soaked, this
       // branch is unreachable and can be removed.
-      if (msg.includes("CONFLICT")) {
+      if (code === "CONFLICT" || msg.includes("CONFLICT")) {
         return new Response(JSON.stringify({ error: "CONFLICT" }), {
           status: 409,
           headers,
         });
       }
-      if (msg.includes("BLOB_TOO_LARGE")) {
+      if (code === "BLOB_TOO_LARGE" || msg.includes("BLOB_TOO_LARGE")) {
         return new Response(JSON.stringify({ error: "BLOB_TOO_LARGE" }), {
           status: 400,
+          headers,
+        });
+      }
+      if (code === "RATE_LIMITED" || msg.includes("RATE_LIMITED")) {
+        const limit = readConvexErrorNumber(err, "limit") ?? USER_PREFS_WRITE_RATE_LIMIT;
+        const reset = readConvexErrorNumber(err, "reset") ?? Date.now() + 60_000;
+        setRateLimitResponseHeaders(headers, limit, reset);
+        return new Response(JSON.stringify({ error: "RATE_LIMITED" }), {
+          status: 429,
           headers,
         });
       }
@@ -447,6 +500,7 @@ http.route({
       digestTimezone?: string;
       aiDigestEnabled?: boolean;
       countries?: string[];
+      tickers?: string[];
     };
     try {
       body = await request.json() as typeof body;
@@ -560,28 +614,45 @@ http.route({
           !Array.isArray(body.eventTypes) ||
           !Array.isArray(body.channels) ||
           (body.sensitivity !== undefined && !VALID_SENSITIVITY.has(body.sensitivity as string)) ||
-          (body.countries !== undefined && !Array.isArray(body.countries))
+          (body.countries !== undefined && !Array.isArray(body.countries)) ||
+          (body.tickers !== undefined && !Array.isArray(body.tickers))
         ) {
           return new Response(JSON.stringify({ error: "MISSING_REQUIRED_FIELDS" }), { status: 400, headers: { "Content-Type": "application/json" } });
         }
-        await ctx.runMutation((internal as any).alertRules.setAlertRulesForUser, {
-          userId,
-          variant: body.variant,
-          enabled: body.enabled,
-          eventTypes: body.eventTypes as string[],
-          // Pass body.sensitivity through unchanged (may be undefined).
-          // setAlertRulesForUser now accepts optional sensitivity and uses
-          // resolveEffectivePair to preserve existing.sensitivity on patch and
-          // default to 'high' only on fresh insert. A blind '?? "all"' fallback
-          // here would silently narrow existing daily+all digest users to
-          // daily+high whenever a caller omits the field.
-          // See docs/archive/plans/forbid-realtime-all-events.md §1c.
-          sensitivity: body.sensitivity as "all" | "high" | "critical" | undefined,
-          channels: body.channels as Array<"telegram" | "slack" | "email">,
-          aiDigestEnabled: typeof body.aiDigestEnabled === "boolean" ? body.aiDigestEnabled : undefined,
-          // ISO-3166 alpha-2 country-scope; mutation re-validates + normalizes.
-          countries: Array.isArray(body.countries) ? (body.countries as string[]) : undefined,
-        });
+        try {
+          await ctx.runMutation((internal as any).alertRules.setAlertRulesForUser, {
+            userId,
+            variant: body.variant,
+            enabled: body.enabled,
+            eventTypes: body.eventTypes as string[],
+            // Pass body.sensitivity through unchanged (may be undefined).
+            // setAlertRulesForUser now accepts optional sensitivity and uses
+            // resolveEffectivePair to preserve existing.sensitivity on patch and
+            // default to 'high' only on fresh insert. A blind '?? "all"' fallback
+            // here would silently narrow existing daily+all digest users to
+            // daily+high whenever a caller omits the field.
+            // See docs/archive/plans/forbid-realtime-all-events.md §1c.
+            sensitivity: body.sensitivity as "all" | "high" | "critical" | undefined,
+            channels: body.channels as Array<"telegram" | "slack" | "email">,
+            aiDigestEnabled: typeof body.aiDigestEnabled === "boolean" ? body.aiDigestEnabled : undefined,
+            // ISO-3166 alpha-2 country-scope; mutation re-validates + normalizes.
+            countries: Array.isArray(body.countries) ? (body.countries as string[]) : undefined,
+            // Watchlist ticker-scope (#4922 U3); mutation re-validates + normalizes.
+            tickers: Array.isArray(body.tickers) ? (body.tickers as string[]) : undefined,
+          });
+        } catch (err: unknown) {
+          // normalizeTickers/normalizeCountries throw ConvexError with a
+          // structured code (TICKERS_LIMIT_EXCEEDED / COUNTRIES_LIMIT_EXCEEDED)
+          // when a caller exceeds the 50-entry cap. Surface those as a 400 with
+          // the machine-readable code — matching the set-notification-config
+          // path below — instead of letting them fall to the outer catch as a
+          // generic 500, which the client can't route on.
+          const code = extractConvexErrorCode(err);
+          if (code === "TICKERS_LIMIT_EXCEEDED" || code === "COUNTRIES_LIMIT_EXCEEDED") {
+            return new Response(JSON.stringify({ error: code }), { status: 400, headers: { "Content-Type": "application/json" } });
+          }
+          throw err;
+        }
         return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "Content-Type": "application/json" } });
       }
 
@@ -645,6 +716,9 @@ http.route({
         if (body.countries !== undefined && !Array.isArray(body.countries)) {
           return new Response(JSON.stringify({ error: "COUNTRIES_MUST_BE_ARRAY" }), { status: 400, headers: { "Content-Type": "application/json" } });
         }
+        if (body.tickers !== undefined && !Array.isArray(body.tickers)) {
+          return new Response(JSON.stringify({ error: "TICKERS_MUST_BE_ARRAY" }), { status: 400, headers: { "Content-Type": "application/json" } });
+        }
         try {
           await ctx.runMutation((internal as any).alertRules.setNotificationConfigForUser, {
             userId,
@@ -658,32 +732,32 @@ http.route({
             digestHour: typeof body.digestHour === "number" ? body.digestHour : undefined,
             digestTimezone: typeof body.digestTimezone === "string" ? body.digestTimezone : undefined,
             countries: Array.isArray(body.countries) ? (body.countries as string[]) : undefined,
+            tickers: Array.isArray(body.tickers) ? (body.tickers as string[]) : undefined,
           });
         } catch (err: unknown) {
           // Translate structured ConvexError codes into machine-readable HTTP
           // responses so the UI can route to inline helper text (400) or to
           // the upgrade flow (402). Do NOT swallow as a generic 500 — the
           // client needs the structured `error` field to render the right
-          // surface.
-          const data = (err as { data?: unknown } | undefined)?.data;
-          if (data && typeof data === "object") {
-            const errPayload = data as { code?: string; message?: string };
-            if (errPayload.code === "INCOMPATIBLE_DELIVERY") {
-              return new Response(
-                JSON.stringify({ error: errPayload.code, message: errPayload.message ?? "" }),
-                { status: 400, headers: { "Content-Type": "application/json" } },
-              );
-            }
-            if (errPayload.code === "PRO_REQUIRED") {
-              // 402 Payment Required — the canonical HTTP status for
-              // paywall-gated content. Client reads `error: "PRO_REQUIRED"`
-              // to route to the upgrade flow rather than show a generic
-              // failure toast.
-              return new Response(
-                JSON.stringify({ error: errPayload.code, message: errPayload.message ?? "" }),
-                { status: 402, headers: { "Content-Type": "application/json" } },
-              );
-            }
+          // surface. Use extractConvexErrorCode, which decodes the JSON-STRING
+          // shape ctx.runMutation serializes err.data into across the function
+          // boundary (see :67) — a manual `typeof data === "object"` check
+          // misses every code on this path.
+          const code = extractConvexErrorCode(err);
+          // Preserve the ConvexError message where present — the client renders
+          // it as inline helper text for INCOMPATIBLE_DELIVERY.
+          const parsed = parseConvexErrorData(err);
+          const message = (parsed && typeof parsed === "object")
+            ? (parsed as { message?: string }).message ?? ""
+            : "";
+          if (code === "INCOMPATIBLE_DELIVERY" || code === "TICKERS_LIMIT_EXCEEDED" || code === "COUNTRIES_LIMIT_EXCEEDED") {
+            return new Response(JSON.stringify({ error: code, message }), { status: 400, headers: { "Content-Type": "application/json" } });
+          }
+          if (code === "PRO_REQUIRED") {
+            // 402 Payment Required — the canonical HTTP status for paywall-gated
+            // content. Client reads `error: "PRO_REQUIRED"` to route to the
+            // upgrade flow rather than show a generic failure toast.
+            return new Response(JSON.stringify({ error: code, message }), { status: 402, headers: { "Content-Type": "application/json" } });
           }
           throw err;
         }
@@ -712,6 +786,35 @@ http.route({
       });
     }
     const rules = await ctx.runQuery((internal as any).alertRules.getDigestRules);
+    return new Response(JSON.stringify(rules), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }),
+});
+
+// Service-to-service: the notification relay fetches ALL enabled rules (it
+// fans out alerts + drains quiet-hours batches). Wraps the INTERNAL
+// `alertRules.getByEnabled` (GHSA-r649-4cqj-w93h) behind the shared secret so
+// the cross-tenant scan is never reachable anonymously. `?enabled=false`
+// selects the disabled set; defaults to enabled=true (all the relay ever asks).
+http.route({
+  path: "/relay/enabled-rules",
+  method: "GET",
+  handler: httpAction(async (ctx, request) => {
+    const secret = process.env.RELAY_SHARED_SECRET ?? "";
+    const provided = (request.headers.get("Authorization") ?? "").replace(/^Bearer\s+/, "");
+    if (!secret || !(await timingSafeEqualStrings(provided, secret))) {
+      return new Response(JSON.stringify({ error: "UNAUTHORIZED" }), {
+        status: 401,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    const enabled = new URL(request.url).searchParams.get("enabled") !== "false";
+    const rules = await ctx.runQuery(
+      (internal as any).alertRules.getByEnabled,
+      { enabled },
+    );
     return new Response(JSON.stringify(rules), {
       status: 200,
       headers: { "Content-Type": "application/json" },
@@ -1248,6 +1351,7 @@ http.route({
       returnUrl?: string;
       discountCode?: string;
       referralCode?: string;
+      bypassPendingGuard?: boolean;
     };
     try {
       body = await request.json() as typeof body;
@@ -1276,6 +1380,7 @@ http.route({
           returnUrl: body.returnUrl,
           discountCode: body.discountCode,
           referralCode: body.referralCode,
+          bypassPendingGuard: body.bypassPendingGuard,
         },
       );
       if (
@@ -1284,17 +1389,20 @@ http.route({
         "blocked" in result &&
         result.blocked === true
       ) {
-        return new Response(
-          JSON.stringify({
-            error: result.code,
-            message: result.message,
-            subscription: result.subscription,
-          }),
-          {
-            status: 409,
-            headers: { "Content-Type": "application/json" },
-          },
-        );
+        // Both blocked shapes share { code, message }; the duplicate-subscription
+        // block carries `subscription`, the pending-payment block (#4438) carries
+        // `pendingPayment`. Forward whichever is present so the client dialog can
+        // render. Both return 409 — the client discriminates on `error` (code).
+        const blockedBody: Record<string, unknown> = {
+          error: result.code,
+          message: result.message,
+        };
+        if ("subscription" in result) blockedBody.subscription = result.subscription;
+        if ("pendingPayment" in result) blockedBody.pendingPayment = result.pendingPayment;
+        return new Response(JSON.stringify(blockedBody), {
+          status: 409,
+          headers: { "Content-Type": "application/json" },
+        });
       }
       return new Response(JSON.stringify(result), {
         status: 200,

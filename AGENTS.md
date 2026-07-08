@@ -4,7 +4,7 @@ Agent entry point for WorldMonitor. Read this first, then follow links for depth
 
 ## What This Project Is
 
-Real-time global intelligence dashboard. TypeScript SPA (Vite + Preact) with 86 panel components, 60+ Vercel Edge API endpoints, a Tauri desktop app with Node.js sidecar, and a Railway relay service. Aggregates 30+ external data sources (geopolitics, military, finance, climate, cyber, maritime, aviation).
+Real-time global intelligence dashboard. TypeScript SPA (Vite + Preact) with 160 top-level TypeScript component files, 80+ Vercel Edge API endpoint entries, a Tauri desktop app with Node.js sidecar, and a Railway relay service. Aggregates geopolitics, military, finance, climate, cyber, maritime, and aviation data across 35 freshness-tracked source groups.
 
 ## Repository Map
 
@@ -12,9 +12,16 @@ Real-time global intelligence dashboard. TypeScript SPA (Vite + Preact) with 86 
 .
 ├── src/                    # Browser SPA (TypeScript, class-based components)
 │   ├── app/                # App orchestration (data-loader, refresh-scheduler, panel-layout)
-│   ├── components/         # 86 UI panels + map components (Panel subclasses)
+│   ├── bootstrap/          # Startup/recovery (chunk reload, deferred Sentry, SW update)
+│   ├── components/         # 160 top-level TypeScript component files
 │   ├── config/             # Variant configs, panel/layer definitions, market symbols
-│   ├── services/           # Business logic (120+ service files, organized by domain)
+│   ├── services/           # Business logic (196 service modules and domain directories)
+│   ├── shared/             # Cross-cutting helpers (premium paths, registries, staleness)
+│   ├── embed/              # Embeddable widget loader
+│   ├── styles/             # Global CSS (layers, themes, panel styles)
+│   ├── shims/              # Runtime shims (child-process for sidecar)
+│   ├── data/               # Static JSON datasets (conservation, renewable, happiness)
+│   ├── e2e/                # Map test harnesses (consumed by Playwright specs)
 │   ├── types/              # TypeScript type definitions
 │   ├── utils/              # Shared utilities (circuit-breaker, theme, URL state, DOM)
 │   ├── workers/            # Web Workers (analysis, ML/ONNX, vector DB)
@@ -35,14 +42,19 @@ Real-time global intelligence dashboard. TypeScript SPA (Vite + Preact) with 86 
 │   ├── buf.yaml            # Buf configuration
 │   └── worldmonitor/       # Service definitions with HTTP annotations
 ├── shared/                 # Cross-platform data (JSON configs for markets, RSS domains)
+├── data/                   # Static data (telegram channels, OREF threat translations, gamma irradiators)
+├── public/                 # Static assets served as-is (favicons, textures, .well-known, llms.txt)
 ├── scripts/                # Seed scripts, build helpers, data fetchers
 ├── src-tauri/              # Tauri desktop shell (Rust + Node.js sidecar)
 │   └── sidecar/            # Node.js sidecar API server
+├── consumer-prices-core/   # Consumer-price scrapers (Playwright, per-country baskets; Railway/Docker)
+├── workers/                # Cloudflare Workers (edge CORS preflight for api.worldmonitor.app)
 ├── tests/                  # Unit/integration tests (node:test runner)
 ├── e2e/                    # Playwright E2E specs
+├── pro-test/               # Standalone Pro QA app (separate package)
 ├── docs/                   # Mintlify documentation site
 ├── docker/                 # Docker build for Railway services
-├── deploy/                 # Deployment configs
+├── deploy/                 # Deployment configs (nginx)
 └── blog-site/              # Static blog (built into public/blog/)
 ```
 
@@ -58,7 +70,7 @@ npm run typecheck:api    # Typecheck API layer separately
 npm run test:data        # Run unit/integration tests
 npm run test:sidecar     # Run sidecar + API handler tests
 npm run test:e2e         # Run all Playwright E2E tests
-make generate            # Regenerate proto stubs + per-service & unified OpenAPI specs (requires buf + sebuf v0.11.0 plugins)
+make generate            # Regenerate proto stubs + per-service & unified OpenAPI specs (requires buf + sebuf v0.11.1 plugins)
 npm run worktree:bootstrap          # Fresh worktree: link local env files + npm ci with tmp cache
 npm run worktree:bootstrap:test-only # Fresh docs/test worktree: same, but npm ci --ignore-scripts
 npm run worktree:env                # Link ignored local env files only
@@ -187,16 +199,22 @@ Variant is set via `VITE_VARIANT` env var. Config lives in `src/config/variants/
 
 ## Pre-Push Hook
 
-Runs automatically before `git push`:
+Runs automatically before `git push`. Two tiers:
 
-1. Local Vercel env dump guard (blocks pushes when `.env.vercel-backup` or `.env.vercel-export` exist in repo root)
-2. TypeScript check (src + API)
-3. CJS syntax validation
-4. Edge function esbuild bundle check
-5. Edge function import guardrail test
-6. Markdown lint
-7. MDX lint (Mintlify compatibility)
-8. Version sync check
+**Always (state-dependent, fast — run even on a cache hit):** local Vercel env-dump guard, PR-state check (no pushes to merged/closed PR branches), branch-contamination guard (>20 commits ahead), `scripts/` lockfile sync.
+
+**Tree-dependent (skipped entirely on a green-tree cache hit):** Unicode safety and version sync (always run for uncached trees), plus the diff-scoped checks: TypeScript (frontend tsc on `src/`-surface changes; `typecheck:api` on `api/|server/|scripts/|src/generated/`; Convex tsc on `convex/`), CJS syntax, boundary/safe-html/Sentry-coverage/rate-limit/premium-fetch lints (each also fires when its own guardrail script changes), edge esbuild check (`api/|server/|src/generated/` — edge entries bundle-import server code), markdown/MDX lint, proto + pro-test bundle freshness, change-scoped tests. `package.json`/`tsconfig` changes — or an unresolvable `origin/main` diff — force everything (an unresolvable diff also bypasses the green-tree cache: a blind run trusts nothing, including prior attestations).
+
+**Green-tree cache:** a tree that passed the full gate is recorded (`$GIT_DIR/wm-prepush-green`); re-pushing the identical tree (remote failure, message-only amend) skips all tree-dependent checks — same tree, same result. Delete that file to force a full re-run.
+
+Heavy checks (`test:data`, typechecks, edge-bundle) must run **sequentially** in worktrees — parallel runs OOM (exit 137).
+
+## Shipping Velocity (Agent Workflow)
+
+- **Before starting work on an issue:** check for parallel/duplicate work first — `gh pr list --search "<issue#>"` AND `git worktree list` (background codex/claude sessions ship PRs under the same account).
+- **After pushing a PR:** don't sleep-poll CI. Enable auto-merge (`gh pr merge <n> --auto --squash` — repo has auto-merge enabled) and/or start `gh pr checks <n> --watch` as a background task; act only when it exits.
+- **docs/plans/ is gitignored** — plan documents are local working state and do not travel between worktrees or ship in PRs.
+- **PR-review verification:** never assert a finding is fixed/stale from memory — re-fetch the PR head SHA and diff the cited lines first.
 
 ## Deployment
 
