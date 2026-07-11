@@ -257,4 +257,47 @@ describe('#4580 boot skeleton <-> app footprint parity', () => {
       `The skeleton mobile block must gate at MOBILE_BREAKPOINT_PX (${breakpoint}px), not a 1px-off seam`,
     );
   });
+
+  it('collapsed cohort: #mapSection is CREATED with .collapsed when the pref is set (#5159)', () => {
+    // The pre-paint html.wm-map-collapsed critical CSS can only cover the boot
+    // SKELETON: main.css sets the expanded mobile .map-section height with
+    // !important inside a cascade layer, and for !important declarations
+    // LAYERED beats UNLAYERED — the inverse of the normal-declaration rule the
+    // critical CSS relies on. So the REAL section must be born collapsed: the
+    // renderLayout template seeds .collapsed from the same localStorage key the
+    // toggle persists. Without this, #mapSection paints expanded (~796px) and
+    // snaps up 698px when setupMobileMapToggle runs (~150ms later; CLS 0.617,
+    // reproduced 3/3 for the mobile-map-collapsed cohort).
+    assert.match(
+      panelLayout,
+      /const mapStartsCollapsed = this\.ctx\.isMobile && PanelLayoutManager\.isMobileMapCollapsedPreferred\(\);/,
+      'renderLayout must read the collapse pref (via the guarded helper) before building the shell template',
+    );
+    // #5205 review P1: this read runs BEFORE the shell installs — a bare
+    // localStorage access throws under blocked storage (SecurityError) and
+    // would strand users on the boot skeleton. The helper must route through
+    // the try/catch-guarded loadFromStorage with an expanded default.
+    assert.match(
+      panelLayout,
+      /private static isMobileMapCollapsedPreferred\(\): boolean \{\s*return loadFromStorage<boolean>\('mobile-map-collapsed', false\) === true;/,
+      'the collapse-pref read must use guarded loadFromStorage, defaulting to expanded',
+    );
+    assert.doesNotMatch(
+      panelLayout,
+      /localStorage\.getItem\('mobile-map-collapsed'\)/,
+      'no bare localStorage read of the collapse pref may remain (boot-critical path)',
+    );
+    assert.match(
+      panelLayout,
+      /<div class="map-section\$\{mapStartsCollapsed \? ' collapsed' : ''\}" id="mapSection">/,
+      '#mapSection must be created with .collapsed for the collapsed cohort — adding it later shifts #panelsGrid',
+    );
+    // The critical CSS must keep the do-not-retry note so nobody re-attempts an
+    // unlayered !important pre-paint override of the layered expanded height.
+    assert.match(
+      html,
+      /do NOT try to pre-paint-collapse the REAL \.map-section/,
+      'index.html must document why the real section is not styled from critical CSS (#5159 layered-!important inversion)',
+    );
+  });
 });
