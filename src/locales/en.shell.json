@@ -321,6 +321,7 @@
     "serverError": "Server error: {{status}}",
     "unknownError": "Unknown error",
     "generatedWidget": "Generated widget: {{title}}",
+    "saveFailed": "Widget could not be saved. Please try again.",
     "checkingConnection": "Checking widget access…",
     "preflightConnected": "Connected to the widget agent",
     "preflightInvalidKey": "Widget key rejected. Update wm-widget-key and reload.",
@@ -775,15 +776,15 @@
       "verifyFailed": "Saved verified keys. Failed: {{errors}}",
       "worldMonitor": {
         "apiKey": {
-          "title": "License Key",
+          "title": "License / API Key",
           "placeholder": "wm_xxxxxxxxxxxxxxxxxxxxxxxx",
-          "description": "Paste your license to unlock every data source and AI feature instantly."
+          "description": "API Starter and API Business subscribers create this key on the web dashboard under Settings → API Keys. If a full key is lost, revoke it and create a replacement."
         },
         "dividerOr": "OR",
         "register": {
-          "title": "Reserve Your Spot",
-          "description": "We're preparing to launch World Monitor licenses. Sign up now and be first in line — early members get priority access and founding-member pricing.",
-          "submitBtn": "Join Waitlist"
+          "title": "Need an API key?",
+          "description": "See worldmonitor.app/docs/api-keys for step-by-step help. Manual API keys require an API Starter or API Business plan.",
+          "submitBtn": "View API plans"
         }
       },
       "freePanelLimit": "Free plan: max {{max}} panels. Upgrade to PRO for unlimited."

@@ -23,7 +23,15 @@ import {
   selectDatasets,
 } from '../filters';
 import type { ToolDef } from '../types';
-import { CHOKEPOINT_MONITOR_UI_URI, MARKET_RADAR_UI_URI } from '../ui/registry';
+import {
+  CHOKEPOINT_MONITOR_UI_URI,
+  CONFLICT_EVENTS_UI_URI,
+  FORECASTS_UI_URI,
+  MARKET_RADAR_UI_URI,
+  NATURAL_DISASTERS_UI_URI,
+  NEWS_INTELLIGENCE_UI_URI,
+  PREDICTION_MARKETS_UI_URI,
+} from '../ui/registry';
 
 // Iran-events domain sunset (war ended 2026-07). Default OFF: drop the dormant
 // conflict:iran-events:v1 key from the get_conflict_events cache set so the MCP
@@ -171,6 +179,7 @@ export const CACHE_TOOLS: ToolDef[] = [
   },
   {
     name: 'get_conflict_events',
+    _uiResourceUri: CONFLICT_EVENTS_UI_URI,
     _outputBudgetBytes: 131072,
     description: 'Active armed conflict events (UCDP, Iran), unrest events with geo-coordinates, and country risk scores. Covers ongoing conflicts, protests, and instability indices worldwide.',
     inputSchema: {
@@ -320,6 +329,7 @@ export const CACHE_TOOLS: ToolDef[] = [
   },
   {
     name: 'get_news_intelligence',
+    _uiResourceUri: NEWS_INTELLIGENCE_UI_URI,
     _outputBudgetBytes: 131072,
     description: 'AI-classified geopolitical threat news summaries, GDELT intelligence signals, cross-source signals, and security advisories from WorldMonitor\'s intelligence layer.',
     inputSchema: {
@@ -342,8 +352,13 @@ export const CACHE_TOOLS: ToolDef[] = [
         type: ['object', 'null'],
         properties: {
           topStories: { type: 'array', items: { type: 'object', properties: {
-            title: { type: 'string' }, category: { type: 'string' }, countryCode: { type: 'string' },
-            isAlert: { type: 'boolean' }, summary: { type: 'string' },
+            primaryTitle: { type: 'string' }, primarySource: { type: 'string' }, primaryLink: { type: 'string' },
+            pubDate: { type: 'string' }, sourceCount: { type: 'number' }, importanceScore: { type: 'number' },
+            velocity: { type: 'object', properties: {
+              level: { type: 'string' }, sourcesPerHour: { type: 'number' },
+            } },
+            category: { type: 'string' }, threatLevel: { type: 'string' },
+            countryCode: { type: ['string', 'null'] }, isAlert: { type: 'boolean' },
           } } },
         },
       },
@@ -397,6 +412,7 @@ export const CACHE_TOOLS: ToolDef[] = [
   },
   {
     name: 'get_natural_disasters',
+    _uiResourceUri: NATURAL_DISASTERS_UI_URI,
     _outputBudgetBytes: 131072,
     description: 'Recent earthquakes (USGS), active wildfires (NASA FIRMS), and natural hazard events. Includes magnitude, location, and threat severity.',
     inputSchema: {
@@ -418,8 +434,13 @@ export const CACHE_TOOLS: ToolDef[] = [
         type: ['object', 'null'],
         properties: {
           earthquakes: { type: 'array', items: { type: 'object', properties: {
-            magnitude: { type: 'number' }, place: { type: 'string' }, time: { type: ['number', 'string'] },
-            latitude: { type: 'number' }, longitude: { type: 'number' }, depth: { type: 'number' },
+            id: { type: 'string' }, place: { type: 'string' }, magnitude: { type: 'number' },
+            depthKm: { type: 'number' }, occurredAt: { type: 'number' }, sourceUrl: { type: 'string' },
+            location: { type: 'object', properties: {
+              latitude: { type: 'number' }, longitude: { type: 'number' },
+            } },
+            nearTestSite: { type: 'boolean' }, testSiteName: { type: 'string' },
+            concernScore: { type: 'number' }, concernLevel: { type: 'string' },
           } } },
         },
       },
@@ -427,8 +448,17 @@ export const CACHE_TOOLS: ToolDef[] = [
         type: ['object', 'null'],
         properties: {
           fireDetections: { type: 'array', items: { type: 'object', properties: {
-            latitude: { type: 'number' }, longitude: { type: 'number' },
-            brightness: { type: 'number' }, confidence: { type: ['number', 'string'] },
+            id: { type: 'string' },
+            location: { type: 'object', properties: {
+              latitude: { type: 'number' }, longitude: { type: 'number' },
+            } },
+            brightness: { type: 'number' }, frp: { type: 'number' },
+            confidence: { type: 'string', enum: [
+              'FIRE_CONFIDENCE_HIGH', 'FIRE_CONFIDENCE_NOMINAL',
+              'FIRE_CONFIDENCE_LOW', 'FIRE_CONFIDENCE_UNSPECIFIED',
+            ] },
+            satellite: { type: 'string' }, detectedAt: { type: 'number' }, region: { type: 'string' },
+            dayNight: { type: 'string' }, possibleExplosion: { type: 'boolean' },
           } } },
         },
       },
@@ -863,6 +893,7 @@ export const CACHE_TOOLS: ToolDef[] = [
   },
   {
     name: 'get_prediction_markets',
+    _uiResourceUri: PREDICTION_MARKETS_UI_URI,
     _outputBudgetBytes: 131072,
     description: 'Active Polymarket event contracts with current probabilities. Covers geopolitical, economic, and election prediction markets.',
     inputSchema: {
@@ -883,9 +914,21 @@ export const CACHE_TOOLS: ToolDef[] = [
       'markets-bootstrap': {
         type: ['object', 'null'],
         properties: {
-          geopolitical: { type: 'array', items: { type: 'object', properties: { title: { type: 'string' }, source: { type: 'string' }, probability: { type: 'number' } } } },
-          tech:         { type: 'array', items: { type: 'object', properties: { title: { type: 'string' }, source: { type: 'string' }, probability: { type: 'number' } } } },
-          finance:      { type: 'array', items: { type: 'object', properties: { title: { type: 'string' }, source: { type: 'string' }, probability: { type: 'number' } } } },
+          geopolitical: { type: 'array', items: { type: 'object', properties: {
+            title: { type: 'string' }, yesPrice: { type: 'number', minimum: 0, maximum: 100 },
+            source: { type: 'string' }, volume: { type: 'number' }, url: { type: 'string' },
+            endDate: { type: 'string' }, regions: { type: 'array', items: { type: 'string' } },
+          } } },
+          tech: { type: 'array', items: { type: 'object', properties: {
+            title: { type: 'string' }, yesPrice: { type: 'number', minimum: 0, maximum: 100 },
+            source: { type: 'string' }, volume: { type: 'number' }, url: { type: 'string' },
+            endDate: { type: 'string' }, regions: { type: 'array', items: { type: 'string' } },
+          } } },
+          finance: { type: 'array', items: { type: 'object', properties: {
+            title: { type: 'string' }, yesPrice: { type: 'number', minimum: 0, maximum: 100 },
+            source: { type: 'string' }, volume: { type: 'number' }, url: { type: 'string' },
+            endDate: { type: 'string' }, regions: { type: 'array', items: { type: 'string' } },
+          } } },
         },
       },
     }),
@@ -1755,6 +1798,7 @@ export const CACHE_TOOLS: ToolDef[] = [
   },
   {
     name: 'get_forecast_predictions',
+    _uiResourceUri: FORECASTS_UI_URI,
     _outputBudgetBytes: 131072,
     description: 'AI-generated geopolitical and economic forecasts from WorldMonitor\'s predictive models. Covers upcoming risk events and probability assessments.',
     inputSchema: {

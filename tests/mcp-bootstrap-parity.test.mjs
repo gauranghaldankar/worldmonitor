@@ -146,6 +146,26 @@ const EXCLUDED_FROM_MCP = new Map([
     'deferred: recovery pillar scorer input. Future resilience tool will expose recovery dimensions.'],
 
   // ===========================================================================
+  // #5055 health-only seed probes added to strict /api/health monitoring.
+  // ===========================================================================
+  ['economic:energy:v1:all',
+    'deferred: strict health seed probe added by #5055; future economic-data MCP expansion can expose energy prices directly.'],
+  ['shared:fx-rates:v1',
+    'deferred: strict health seed probe added by #5055; FX rates are shared infrastructure consumed by seeders and future economic MCP expansion.'],
+  ['infrastructure:submarine-cables:v1',
+    'deferred: strict health seed probe added by #5055; future infrastructure MCP expansion can expose the cable inventory directly.'],
+  ['patents:defense:latest',
+    'deferred: strict health seed probe added by #5055; future military or defense-innovation MCP expansion can expose patent summaries.'],
+  ['conflict:acled:v1:all:0:0',
+    'deferred: strict health seed probe added by #5055; ACLED aggregate currently feeds downstream intelligence and forecast inputs.'],
+  ['portwatch:disruptions:active:v1',
+    'deferred: strict health seed probe added by #5055; disruptions are consumed by chokepoint hazard scoring until a PortWatch MCP expansion exists.'],
+  ['seed-meta:comtrade:bilateral-hs4',
+    'operational: meta-only aggregate health probe added by #5055 for sharded comtrade:bilateral-hs4:{iso2}:v1 payloads; no queryable data slice lives at this key.'],
+  ['research:arxiv:v1:cs.AI::50',
+    'deferred: strict health seed probe added by #5055; future research MCP expansion can expose the ArXiv/HN trending feed.'],
+
+  // ===========================================================================
   // Deferred follow-up tools (explicit gaps named in the plan or related domain)
   // ===========================================================================
   ['intelligence:gpsjam:v2',
@@ -220,6 +240,24 @@ const EXCLUDED_FROM_MCP = new Map([
     'deferred: derived economic stress composite; underlying inputs already exposed via get_economic_data. A future composite-narrative tool would bundle this.'],
   ['economic:fred:v1:GSCPI:0',
     'deferred: NY Fed Global Supply Chain Pressure Index (single FRED series); supply-chain pressure already broadly covered via get_supply_chain_data + get_chokepoint_status. Future composite supply-chain tool could expose this.'],
+  ['economic:fred:v1:WALCL:0',
+    'forecast-internal: strict health probe added by #5101 for forecast macro inputs. Fed Funds is the canonical FRED MCP surface today; future expanded macro/rates tool can expose this single series directly.'],
+  ['economic:fred:v1:T10Y2Y:0',
+    'forecast-internal: strict health probe added by #5101 for forecast macro inputs. Fed Funds is the canonical FRED MCP surface today; future expanded macro/rates tool can expose this single series directly.'],
+  ['economic:fred:v1:UNRATE:0',
+    'forecast-internal: strict health probe added by #5101 for forecast macro inputs. Fed Funds is the canonical FRED MCP surface today; future expanded macro/rates tool can expose this single series directly.'],
+  ['economic:fred:v1:CPIAUCSL:0',
+    'forecast-internal: strict health probe added by #5101 for forecast macro inputs. Fed Funds is the canonical FRED MCP surface today; future expanded macro/rates tool can expose this single series directly.'],
+  ['economic:fred:v1:DGS10:0',
+    'forecast-internal: strict health probe added by #5101 for forecast macro inputs. Fed Funds is the canonical FRED MCP surface today; future expanded macro/rates tool can expose this single series directly.'],
+  ['economic:fred:v1:VIXCLS:0',
+    'forecast-internal: strict health probe added by #5101 for forecast macro inputs. Fed Funds is the canonical FRED MCP surface today; future expanded macro/rates tool can expose this single series directly.'],
+  ['economic:fred:v1:GDP:0',
+    'forecast-internal: strict health probe added by #5101 for forecast macro inputs. Fed Funds is the canonical FRED MCP surface today; future expanded macro/rates tool can expose this single series directly.'],
+  ['economic:fred:v1:M2SL:0',
+    'forecast-internal: strict health probe added by #5101 for forecast macro inputs. Fed Funds is the canonical FRED MCP surface today; future expanded macro/rates tool can expose this single series directly.'],
+  ['economic:fred:v1:DCOILWTICO:0',
+    'forecast-internal: strict health probe added by #5101 for forecast macro inputs. Fed Funds is the canonical FRED MCP surface today; future expanded macro/rates tool can expose this single series directly.'],
   ['economic:fred:v1:ESTR:0',
     'deferred: ECB €STR short-rate (single FRED series). Future expanded rates tool. Fed Funds (economic:fred:v1:FEDFUNDS:0) already exposed via get_economic_data.'],
   ['economic:fred:v1:EURIBOR3M:0',

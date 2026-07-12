@@ -13,7 +13,7 @@
 // metricKey format: '<feedKey>|<fn>(<field>==<value>)' — a path expression
 // over the shape read from that feed, with REAL substituted values (region,
 // title, ticker) and a unified '==' comparison grammar across every family,
-// e.g. 'conflict:ucdp-events:v1|count(country==Mali)' or
+// e.g. 'conflict:acled-resolution:v1:all:0:0|count(country==Mali)' or
 // 'market:commodities-bootstrap:v1|price(symbol==CL=F)'. It documents where in
 // the feed the metric lives and what to match; it is not executable code and
 // is not parsed by this module or any consumer today (Bet 2's resolver
@@ -41,6 +41,10 @@ export const HORIZON_MS = {
   '30d': 30 * DAY_MS,
 };
 
+export const CONFLICT_COUNT_SOURCE_FEED = 'conflict:acled-resolution:v1:all:0:0';
+export const UNREST_COUNT_SOURCE_FEED = 'unrest:events-resolution:v1';
+export const CYBER_COUNT_SOURCE_FEED = 'cyber:threats-bootstrap:v2';
+
 // Never returns null and never silently coerces an unrecognized horizon to a
 // nearby one — a silent '7d' fallback would score a 14d forecast a full week
 // early and corrupt the track record this bet exists to make trustworthy.
@@ -61,10 +65,13 @@ export function deriveDeadline(generatedAt, timeHorizon) {
 // keys (not path expressions) — `metricKey` embeds the extraction path on
 // top of one of these. The market entries are copied (string literals, not
 // imported — seed-forecasts.mjs has top-level side effects) from
-// MARKET_INPUT_KEYS (scripts/seed-forecasts.mjs :215) plus the market
-// feed keys already read into `readInputKeys()` (:708-717).
+// MARKET_INPUT_KEYS; the other entries are the non-market feeds hard specs
+// can actually emit and the resolver seeder can read by sourceFeed.
 export const RESOLUTION_FEED_KEYS = new Set([
   'conflict:ucdp-events:v1',
+  CONFLICT_COUNT_SOURCE_FEED,
+  UNREST_COUNT_SOURCE_FEED,
+  CYBER_COUNT_SOURCE_FEED,
   'supply_chain:chokepoints:v4',
   'infra:outages:v1',
   'prediction:markets-bootstrap:v1',
@@ -114,6 +121,9 @@ export const SIGNAL_TO_HARD_FAMILY = {
   commodity: 'market',
   prediction_market: 'prediction_market',
   ucdp: 'ucdp_zone',
+  unrest: 'unrest',
+  unrest_events: 'unrest',
+  cyber: 'cyber',
   gps_jamming: 'gps',
   outage: 'infrastructure',
   conflict_events: 'conflict',
@@ -123,22 +133,19 @@ export const SIGNAL_TO_HARD_FAMILY = {
 };
 
 // Domains whose forecasts are ALWAYS judged (R3), regardless of what signals
-// they carry. Domain is the claim's SUBJECT; signals are only evidence. A
-// political-domain forecast can carry a 'cii' signal (which
-// SIGNAL_TO_HARD_FAMILY maps to the conflict family) — but resolving that
-// political claim against a conflict event-count metric would mis-resolve the
-// political claim. Military posture-transition and cyber-volume thresholds
-// also need dedicated metric design (deferred, D3). This gate is checked
-// AFTER the state_derived origin check and the prediction_market exemption,
-// and BEFORE the general SIGNAL_TO_HARD_FAMILY lookup, so domain wins over any
-// incidental hard-mapped evidence signal — EXCEPT a prediction_market signal,
-// whose forecast's claim *is* the market question (see buildResolutionSpec).
-export const JUDGED_DOMAINS = new Set(['political', 'military', 'cyber']);
+// they carry. Domain is the claim's SUBJECT; signals are only evidence.
+// Political unrest and cyber concentration now have country/date feeds with a
+// direct count metric, but military still lacks a stable theater id on the
+// forecast object. Keep military judged until the detector carries that id.
+// This gate is checked AFTER the state_derived origin check and the
+// prediction_market exemption, and BEFORE the general SIGNAL_TO_HARD_FAMILY
+// lookup.
+export const JUDGED_DOMAINS = new Set(['military']);
 
 // Which hard families a forecast's DOMAIN permits (R3, by-domain constraint).
 // Domain is the claim's SUBJECT; signals are only evidence. A market-domain
 // forecast carrying a 'cii' signal (evidence of instability driving a
-// commodity move) must NOT resolve as a conflict spec scored against UCDP
+// commodity move) must NOT resolve as a conflict spec scored against conflict
 // event counts — 'conflict' is simply not an allowed family for domain
 // 'market'. When resolving the family from signals, any family not listed for
 // pred.domain is skipped; a domain absent from this table (after the
@@ -154,6 +161,8 @@ export const DOMAIN_TO_HARD_FAMILIES = {
   market: ['market', 'prediction_market'],
   supply_chain: ['supply_chain', 'gps'],
   infrastructure: ['infrastructure'],
+  political: ['unrest'],
+  cyber: ['cyber'],
 };
 
 // The commodity price-MOVE threshold ratio (market family): threshold =
@@ -171,6 +180,26 @@ export const MARKET_PRICE_MOVE_RATIO = 1.1;
 // counted over NEW events dated within [emission, deadline]. Like
 // MARKET_PRICE_MOVE_RATIO, this is a named Bet-2 tuning knob.
 export const CONFLICT_ESCALATION_RATIO = 1.5;
+
+// The conflict/ucdp_zone hard-count families resolve against
+// CONFLICT_COUNT_SOURCE_FEED (conflict:acled-resolution:v1), which only
+// populates with ACLED credentials. Without them the feed is empty and every
+// conflict count spec is unresolvable — it sits pending/VOID forever (#5136).
+// Until a populated near-real-time event-count feed exists, route these
+// families to judged resolution (#5087) instead of emitting a dead hard spec.
+// Article volume (GDELT, #5099/#5134) is NOT a substitute: its scale is
+// article count, not event count, so the horizon-scaled thresholds below would
+// mis-resolve. Flip to true — and confirm the feed is actually seeded — to
+// re-enable hard-count resolution; the threshold logic below is preserved.
+export const CONFLICT_COUNT_FEED_AVAILABLE = false;
+
+// UNREST_COUNT_SOURCE_FEED (unrest:events-resolution:v1) has the identical
+// problem (#5091): seed-unrest-events only writes it from an ACLED resolution
+// fetch (seed-unrest-events.mjs), which is empty without ACLED credentials, so
+// unrest count specs are unresolvable. Same treatment as conflict — route to
+// judged until a populated event-count feed exists. Flip to true once the feed
+// is actually seeded; the threshold logic below is preserved.
+export const UNREST_COUNT_FEED_AVAILABLE = false;
 const YEAR_MS = 365 * 24 * 60 * 60 * 1000;
 
 // FAMILY_FEED / FAMILY_WINDOW map each hard family to its default sourceFeed
@@ -178,8 +207,10 @@ const YEAR_MS = 365 * 24 * 60 * 60 * 1000;
 // resolved per-forecast (commodities feed for a commodity signal, or the
 // calibration fallback feed).
 const FAMILY_FEED = {
-  conflict: 'conflict:ucdp-events:v1',
-  ucdp_zone: 'conflict:ucdp-events:v1',
+  conflict: CONFLICT_COUNT_SOURCE_FEED,
+  ucdp_zone: CONFLICT_COUNT_SOURCE_FEED,
+  unrest: UNREST_COUNT_SOURCE_FEED,
+  cyber: CYBER_COUNT_SOURCE_FEED,
   supply_chain: 'supply_chain:chokepoints:v4',
   infrastructure: 'infra:outages:v1',
   prediction_market: 'prediction:markets-bootstrap:v1',
@@ -200,6 +231,8 @@ const FAMILY_FEED = {
 const FAMILY_WINDOW = {
   conflict: 'within-horizon',
   ucdp_zone: 'within-horizon',
+  unrest: 'within-horizon',
+  cyber: 'within-horizon',
   supply_chain: 'at-deadline',
   infrastructure: 'within-horizon',
   prediction_market: 'at-endDate',
@@ -355,10 +388,16 @@ function resolveHardFamily(pred) {
 // extraction — pulls the first numeric token out of the matching signal's
 // `value` string (the seeder already renders these as human-readable
 // "N units" strings, e.g. "14 UCDP conflict events").
-function deriveHardMetrics(pred, family, inputs) {
+function deriveHardMetrics(pred, family, inputs, options = {}) {
   switch (family) {
     case 'conflict':
     case 'ucdp_zone': {
+      // #5136: the conflict count feed (conflict:acled-resolution:v1) is empty
+      // without ACLED credentials, so a hard spec here is unresolvable. Return
+      // null → buildHardSpec falls back to buildJudgedSpec (LLM judge, #5087).
+      // The `conflictCountFeedAvailable` override lets callers (and the tests
+      // that lock the preserved #5010 threshold logic) force the hard path.
+      if (!(options.conflictCountFeedAvailable ?? CONFLICT_COUNT_FEED_AVAILABLE)) return null;
       // Count threshold comes ONLY from an actual event-count signal
       // (ucdp / conflict_events). A 'cii' value is a 0-100 composite INDEX,
       // not an event count — using it would emit a semantically wrong
@@ -377,7 +416,41 @@ function deriveHardMetrics(pred, family, inputs) {
       if (!Number.isFinite(horizonMs)) return null; // deriveDeadline throws for the judged path too
       const threshold = Math.max(1, Math.round(tally * (horizonMs / YEAR_MS) * CONFLICT_ESCALATION_RATIO));
       return {
-        metricKey: `conflict:ucdp-events:v1|count(country==${pred.region})`,
+        metricKey: `${CONFLICT_COUNT_SOURCE_FEED}|count(country==${pred.region})`,
+        sourceFeed: CONFLICT_COUNT_SOURCE_FEED,
+        operator: '>=',
+        threshold,
+        window: FAMILY_WINDOW[family],
+      };
+    }
+    case 'unrest': {
+      // #5091: unrest:events-resolution:v1 is empty without ACLED credentials
+      // (same root cause as conflict, #5136) → route to judged. The
+      // `unrestCountFeedAvailable` override forces the hard path for the tests
+      // that lock the preserved threshold logic.
+      if (!(options.unrestCountFeedAvailable ?? UNREST_COUNT_FEED_AVAILABLE)) return null;
+      const tally = firstFiniteSignalCount(pred, new Set(['unrest_events']));
+      if (!Number.isFinite(tally)) return null;
+      const horizonMs = HORIZON_MS[pred.timeHorizon];
+      if (!Number.isFinite(horizonMs)) return null;
+      const threshold = Math.max(1, Math.round(tally * (horizonMs / (30 * DAY_MS)) * 0.75));
+      return {
+        metricKey: `${UNREST_COUNT_SOURCE_FEED}|count(country==${pred.region})`,
+        sourceFeed: UNREST_COUNT_SOURCE_FEED,
+        operator: '>=',
+        threshold,
+        window: FAMILY_WINDOW[family],
+      };
+    }
+    case 'cyber': {
+      const tally = firstFiniteSignalCount(pred, new Set(['cyber']));
+      if (!Number.isFinite(tally)) return null;
+      const horizonMs = HORIZON_MS[pred.timeHorizon];
+      if (!Number.isFinite(horizonMs)) return null;
+      const threshold = Math.max(1, Math.round(tally * (horizonMs / (14 * DAY_MS)) * 0.75));
+      return {
+        metricKey: `${CYBER_COUNT_SOURCE_FEED}|count(country==${pred.region})`,
+        sourceFeed: CYBER_COUNT_SOURCE_FEED,
         operator: '>=',
         threshold,
         window: FAMILY_WINDOW[family],
@@ -473,6 +546,15 @@ function buildQuestion(pred) {
   const region = pred.region || 'unspecified region';
   const domain = pred.domain || 'unspecified domain';
   const horizon = pred.timeHorizon || 'unspecified horizon';
+  // Conflict (#5136) and unrest/political (#5091) forecasts are now judged. A
+  // sharper, escalation-framed question resolves more reliably against the news
+  // archive than the generic "resolve YES" phrasing.
+  if (domain === 'conflict') {
+    return `Within the ${horizon} horizon, did ${region} experience a materially escalated level of armed conflict versus its recent baseline, consistent with "${title}"?`;
+  }
+  if (domain === 'political') {
+    return `Within the ${horizon} horizon, did ${region} experience a materially elevated level of civil unrest or political instability versus its recent baseline, consistent with "${title}"?`;
+  }
   return `Will "${title}" (${domain}, ${region}) resolve YES within its ${horizon} horizon?`;
 }
 
@@ -490,8 +572,8 @@ function buildJudgedSpec(pred, generatedAt) {
   };
 }
 
-function buildHardSpec(pred, inputs, family, generatedAt) {
-  const metrics = deriveHardMetrics(pred, family, inputs);
+function buildHardSpec(pred, inputs, family, generatedAt, options = {}) {
+  const metrics = deriveHardMetrics(pred, family, inputs, options);
   if (!metrics || !Number.isFinite(metrics.threshold)) {
     // Threshold fallback (R3/plan step 3): a hard family that cannot derive
     // a finite threshold emits a judged spec rather than an unresolvable
@@ -537,10 +619,8 @@ function buildHardSpec(pred, inputs, family, generatedAt) {
 //     claim's ground truth regardless of the domain the detector assigned
 //     (which can be political/conflict/market). This is unlike a 'cii' signal
 //     on a political claim (evidence, not the claim) — hence the exemption.
-//  3. JUDGED_DOMAINS (political/military/cyber) -> ALWAYS judged. Domain is
-//     the claim's subject; a political forecast carrying a hard-mapped
-//     evidence signal (e.g. 'cii' -> conflict) must not be resolved against a
-//     conflict metric (R3, by-domain assignment).
+//  3. JUDGED_DOMAINS (currently military) -> ALWAYS judged until the detector
+//     carries the stable metric identity needed for a hard feed lookup.
 //  4. Other hard families resolved from pred.signals[].type via
 //     SIGNAL_TO_HARD_FAMILY (with the market-domain chokepoint/ais_gap
 //     exclusion + a calibration.marketPrice fallback for market-domain
@@ -550,7 +630,7 @@ function buildHardSpec(pred, inputs, family, generatedAt) {
 //  6. Otherwise (no-signal-match/unrecognized domain) -> judged.
 // deriveDeadline is the only call that can throw (an unrecognized horizon);
 // buildResolutionSpec itself never throws.
-export function buildResolutionSpec(pred, inputs, generatedAt) {
+export function buildResolutionSpec(pred, inputs, generatedAt, options = {}) {
   if (pred.generationOrigin === 'state_derived') {
     return buildJudgedSpec(pred, generatedAt);
   }
@@ -560,7 +640,7 @@ export function buildResolutionSpec(pred, inputs, generatedAt) {
     (s) => SIGNAL_TO_HARD_FAMILY[s.type] === 'prediction_market',
   );
   if (hasPredictionMarketSignal) {
-    return buildHardSpec(pred, inputs, 'prediction_market', generatedAt);
+    return buildHardSpec(pred, inputs, 'prediction_market', generatedAt, options);
   }
 
   if (JUDGED_DOMAINS.has(pred.domain)) {
@@ -572,15 +652,15 @@ export function buildResolutionSpec(pred, inputs, generatedAt) {
     return buildJudgedSpec(pred, generatedAt);
   }
 
-  return buildHardSpec(pred, inputs, family, generatedAt);
+  return buildHardSpec(pred, inputs, family, generatedAt, options);
 }
 
 // The seam pass (D1): sets pred.resolution on every prediction in place and
 // returns the (same) array for chaining, mirroring the existing
 // calibrateWithMarkets / computeProjections enrichment-pass convention.
-export function attachResolutionSpecs(predictions, inputs, generatedAt) {
+export function attachResolutionSpecs(predictions, inputs, generatedAt, options = {}) {
   for (const pred of predictions) {
-    pred.resolution = buildResolutionSpec(pred, inputs, generatedAt);
+    pred.resolution = buildResolutionSpec(pred, inputs, generatedAt, options);
   }
   return predictions;
 }

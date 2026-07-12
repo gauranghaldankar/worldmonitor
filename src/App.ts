@@ -92,7 +92,7 @@ import {
   waitForBootstrapSlowTier,
   type BootstrapHydrationState,
 } from '@/services/bootstrap';
-import { ensureWmSession, installWmSessionFetchInterceptor } from '@/services/wm-session';
+import { ensureWmSession, installWmSessionFetchInterceptor, WM_SESSION_DEGRADED_EVENT } from '@/services/wm-session';
 import { describeFreshness } from '@/services/persistent-cache';
 import { DesktopUpdater } from '@/app/desktop-updater';
 import { CountryIntelManager } from '@/app/country-intel';
@@ -150,6 +150,8 @@ export class App {
   private pendingDeepLinkCountry: string | null = null;
   private pendingDeepLinkExpanded = false;
   private pendingDeepLinkStoryCode: string | null = null;
+  private pendingDeepLinkChokepoint: string | null = null;
+  private chokepointDeepLinkTimer: number | null = null;
 
   private panelLayout: PanelLayoutManager;
   private dataLoader: DataLoaderManager;
@@ -189,6 +191,11 @@ export class App {
   private followedCountriesCapDropToastTimer: number | null = null;
   private bootstrapHydrationState: BootstrapHydrationState = getBootstrapHydrationState();
   private cachedModeBannerEl: HTMLElement | null = null;
+  private readonly handleWmSessionDegraded = (): void => {
+    if (!this.state.isDestroyed) {
+      showToast('Anonymous data is temporarily unavailable. Check your cookie settings, then reload.');
+    }
+  };
   private readonly handleViewportPrime = (): void => {
     if (this.visiblePanelPrimeRaf !== null) return;
     this.visiblePanelPrimeRaf = window.requestAnimationFrame(() => {
@@ -357,6 +364,8 @@ export class App {
     if (bannerMessage) {
       if (!this.cachedModeBannerEl) {
         this.cachedModeBannerEl = document.createElement('div');
+        // CSS disables pointer events on this status-only container. Keep its descendants
+        // non-interactive unless the banner interaction model is updated with it.
         this.cachedModeBannerEl.className = 'cached-mode-banner';
         this.cachedModeBannerEl.setAttribute('role', 'status');
         this.cachedModeBannerEl.setAttribute('aria-live', 'polite');
@@ -622,11 +631,28 @@ export class App {
     // Panels that must survive variant switches: desktop config, user-created widgets, MCP panels.
     const isDynamicPanel = (k: string) => !ALL_PANELS[k] && (k === 'runtime-config' || k.startsWith('cw-') || k.startsWith('mcp-'));
 
-    // Check if variant changed - reset all settings to variant defaults
-    const storedVariant = localStorage.getItem('worldmonitor-variant');
     const currentVariant = SITE_VARIANT;
-    console.log(`[App] Variant check: stored="${storedVariant}", current="${currentVariant}"`);
-    if (storedVariant !== currentVariant) {
+    let storedVariant: string | null = null;
+    let storageAvailable = true;
+    try {
+      storedVariant = localStorage.getItem('worldmonitor-variant');
+      const probeKey = 'wm-storage-capability-probe';
+      localStorage.setItem(probeKey, '1');
+      localStorage.removeItem(probeKey);
+    } catch {
+      storageAvailable = false;
+    }
+
+    // Blocked storage is a supported no-persistence mode. Seed the same
+    // defaults as a first visit and skip migrations that only mutate storage.
+    if (!storageAvailable) {
+      mapLayers = normalizeExclusiveChoropleths(
+        sanitizeLayersForVariant({ ...defaultLayers }, currentVariant as MapVariant), null,
+      );
+      panelSettings = { ...DEFAULT_PANELS };
+    } else if (storedVariant !== currentVariant) {
+      // Variant changed - reset all settings to variant defaults.
+      console.log(`[App] Variant check: stored="${storedVariant}", current="${currentVariant}"`);
       // Variant changed — seed new variant's panels, disable panels not in the new variant
       console.log('[App] Variant changed - seeding new defaults, disabling cross-variant panels');
       localStorage.setItem('worldmonitor-variant', currentVariant);
@@ -788,44 +814,46 @@ export class App {
       }
     }
 
-    // One-time migration: prune removed panel keys from stored settings and order
-    const PANEL_PRUNE_KEY = 'worldmonitor-panel-prune-v1';
-    if (!localStorage.getItem(PANEL_PRUNE_KEY)) {
-      const validKeys = new Set(Object.keys(ALL_PANELS));
-      let pruned = false;
-      for (const key of Object.keys(panelSettings)) {
-        if (!validKeys.has(key) && key !== 'runtime-config') {
-          delete panelSettings[key];
-          pruned = true;
+    if (storageAvailable) {
+      // One-time migration: prune removed panel keys from stored settings and order
+      const PANEL_PRUNE_KEY = 'worldmonitor-panel-prune-v1';
+      if (!localStorage.getItem(PANEL_PRUNE_KEY)) {
+        const validKeys = new Set(Object.keys(ALL_PANELS));
+        let pruned = false;
+        for (const key of Object.keys(panelSettings)) {
+          if (!validKeys.has(key) && key !== 'runtime-config') {
+            delete panelSettings[key];
+            pruned = true;
+          }
         }
+        if (pruned) saveToStorage(STORAGE_KEYS.panels, panelSettings);
+        for (const orderKey of [PANEL_ORDER_KEY, PANEL_ORDER_KEY + '-bottom-set', PANEL_ORDER_KEY + '-bottom']) {
+          try {
+            const raw = localStorage.getItem(orderKey);
+            if (!raw) continue;
+            const arr = JSON.parse(raw);
+            if (!Array.isArray(arr)) continue;
+            const filtered = arr.filter((k: string) => validKeys.has(k));
+            if (filtered.length !== arr.length) localStorage.setItem(orderKey, JSON.stringify(filtered));
+          } catch { localStorage.removeItem(orderKey); }
+        }
+        localStorage.setItem(PANEL_PRUNE_KEY, 'done');
       }
-      if (pruned) saveToStorage(STORAGE_KEYS.panels, panelSettings);
-      for (const orderKey of [PANEL_ORDER_KEY, PANEL_ORDER_KEY + '-bottom-set', PANEL_ORDER_KEY + '-bottom']) {
-        try {
-          const raw = localStorage.getItem(orderKey);
-          if (!raw) continue;
-          const arr = JSON.parse(raw);
-          if (!Array.isArray(arr)) continue;
-          const filtered = arr.filter((k: string) => validKeys.has(k));
-          if (filtered.length !== arr.length) localStorage.setItem(orderKey, JSON.stringify(filtered));
-        } catch { localStorage.removeItem(orderKey); }
-      }
-      localStorage.setItem(PANEL_PRUNE_KEY, 'done');
-    }
 
-    // One-time migration: clear stale panel ordering and sizing state
-    const LAYOUT_RESET_MIGRATION_KEY = 'worldmonitor-layout-reset-v2.5';
-    if (!localStorage.getItem(LAYOUT_RESET_MIGRATION_KEY)) {
-      const hadSavedOrder = !!localStorage.getItem(PANEL_ORDER_KEY);
-      const hadSavedSpans = !!localStorage.getItem(PANEL_SPANS_KEY);
-      if (hadSavedOrder || hadSavedSpans) {
-        localStorage.removeItem(PANEL_ORDER_KEY);
-        localStorage.removeItem(PANEL_ORDER_KEY + '-bottom');
-        localStorage.removeItem(PANEL_ORDER_KEY + '-bottom-set');
-        clearPanelSpans();
-        console.log('[App] Applied layout reset migration (v2.5): cleared panel order/spans');
+      // One-time migration: clear stale panel ordering and sizing state
+      const LAYOUT_RESET_MIGRATION_KEY = 'worldmonitor-layout-reset-v2.5';
+      if (!localStorage.getItem(LAYOUT_RESET_MIGRATION_KEY)) {
+        const hadSavedOrder = !!localStorage.getItem(PANEL_ORDER_KEY);
+        const hadSavedSpans = !!localStorage.getItem(PANEL_SPANS_KEY);
+        if (hadSavedOrder || hadSavedSpans) {
+          localStorage.removeItem(PANEL_ORDER_KEY);
+          localStorage.removeItem(PANEL_ORDER_KEY + '-bottom');
+          localStorage.removeItem(PANEL_ORDER_KEY + '-bottom-set');
+          clearPanelSpans();
+          console.log('[App] Applied layout reset migration (v2.5): cleared panel order/spans');
+        }
+        localStorage.setItem(LAYOUT_RESET_MIGRATION_KEY, 'done');
       }
-      localStorage.setItem(LAYOUT_RESET_MIGRATION_KEY, 'done');
     }
 
     // Desktop key management panel must always remain accessible in Tauri.
@@ -852,7 +880,7 @@ export class App {
       mapLayers.cyberThreats = false;
     }
     // One-time migration: reduce default-enabled sources (full variant only)
-    if (currentVariant === 'full') {
+    if (currentVariant === 'full' && storageAvailable) {
       const baseKey = 'worldmonitor-sources-reduction-v3';
       if (!localStorage.getItem(baseKey)) {
         const defaultDisabled = computeDefaultDisabledSources();
@@ -943,6 +971,7 @@ export class App {
       isIdle: false,
       initialLoadComplete: false,
       resolvedLocation: 'global',
+      activeChokepoint: initialUrlState.chokepoint ?? null,
       initialUrlState,
       PANEL_ORDER_KEY,
       PANEL_SPANS_KEY,
@@ -1330,6 +1359,7 @@ export class App {
     // API key path and doesn't need this; Clerk-authenticated users will pass
     // their JWT in a Bearer header and the interceptor steps aside.
     if (!isDesktopRuntime()) {
+      window.addEventListener(WM_SESSION_DEGRADED_EVENT, this.handleWmSessionDegraded);
       installWmSessionFetchInterceptor();
       await ensureWmSession();
       markLcpDebug('wm:boot:session-ready');
@@ -1547,6 +1577,7 @@ export class App {
     const initState = parseMapUrlState(window.location.search, this.state.mapLayers);
     this.pendingDeepLinkCountry = initState.country ?? null;
     this.pendingDeepLinkExpanded = initState.expanded === true;
+    this.pendingDeepLinkChokepoint = initState.chokepoint ?? null;
     const earlyParams = new URLSearchParams(window.location.search);
     this.pendingDeepLinkStoryCode = earlyParams.get('c') ?? null;
     this.eventHandlers.setupUrlStateSync();
@@ -1683,13 +1714,17 @@ export class App {
     // already short-circuited pro users.
     let panelSettings = loadFromStorage<Record<string, PanelConfig>>(STORAGE_KEYS.panels, {});
     let panelsChanged = false;
-    if (!localStorage.getItem(FREE_MAP_PANEL_ACCESS_KEY)) {
-      const restoredPanels = restoreFreeMapPanelAccess(panelSettings);
-      if (panelSettings.map?.enabled !== restoredPanels.map?.enabled) {
-        panelSettings = restoredPanels;
-        panelsChanged = true;
+    try {
+      if (!localStorage.getItem(FREE_MAP_PANEL_ACCESS_KEY)) {
+        const restoredPanels = restoreFreeMapPanelAccess(panelSettings);
+        if (panelSettings.map?.enabled !== restoredPanels.map?.enabled) {
+          panelSettings = restoredPanels;
+          panelsChanged = true;
+        }
+        localStorage.setItem(FREE_MAP_PANEL_ACCESS_KEY, 'done');
       }
-      localStorage.setItem(FREE_MAP_PANEL_ACCESS_KEY, 'done');
+    } catch {
+      // Persistence-only migration; blocked storage already uses defaults.
     }
     const clampedPanels = enforceFreePanelLimit(panelSettings, false);
     for (const key of Object.keys(panelSettings)) {
@@ -1766,6 +1801,10 @@ export class App {
       window.cancelAnimationFrame(this.visiblePanelPrimeRaf);
       this.visiblePanelPrimeRaf = null;
     }
+    if (this.chokepointDeepLinkTimer !== null) {
+      window.clearTimeout(this.chokepointDeepLinkTimer);
+      this.chokepointDeepLinkTimer = null;
+    }
 
     // Destroy all modules in reverse order
     for (let i = this.modules.length - 1; i >= 0; i--) {
@@ -1776,12 +1815,14 @@ export class App {
     this.unsubAiFlow?.();
     this.unsubFreeTier?.();
     this.unsubEntitlementPremiumLoaders?.();
+    mlWorker.terminate();
     this.state.findingsBadge?.destroy();
     this.state.findingsBadge = null;
     this.state.breakingBanner?.destroy();
     destroyBreakingNewsAlerts();
     this.cachedModeBannerEl?.remove();
     this.cachedModeBannerEl = null;
+    window.removeEventListener(WM_SESSION_DEGRADED_EVENT, this.handleWmSessionDegraded);
     if (this.followedCountriesCapDropToastTimer !== null) {
       window.clearTimeout(this.followedCountriesCapDropToastTimer);
       this.followedCountriesCapDropToastTimer = null;
@@ -1960,6 +2001,24 @@ export class App {
           this.state.map?.setRenderPaused(false);
           showToast('Country brief failed to open. Please try again.');
         });
+        this.eventHandlers.syncUrlState();
+      }, DEEP_LINK_INITIAL_DELAY_MS);
+    }
+
+    // Check for chokepoint deep link: ?chokepoint=bab_el_mandeb — pans the map to
+    // the waterway and opens its popup (the chokepoint equivalent of the country
+    // brief deep link). openChokepoint no-ops on an unknown id.
+    const deepLinkChokepoint = this.pendingDeepLinkChokepoint;
+    this.pendingDeepLinkChokepoint = null;
+    if (deepLinkChokepoint) {
+      trackDeeplinkOpened('chokepoint', deepLinkChokepoint);
+      this.state.activeChokepoint = deepLinkChokepoint;
+      this.chokepointDeepLinkTimer = window.setTimeout(() => {
+        this.chokepointDeepLinkTimer = null;
+        if (this.state.isDestroyed) return;
+        this.state.mapLayers.waterways = true;
+        this.state.map?.enableLayer('waterways');
+        this.state.map?.openChokepoint(deepLinkChokepoint);
         this.eventHandlers.syncUrlState();
       }, DEEP_LINK_INITIAL_DELAY_MS);
     }

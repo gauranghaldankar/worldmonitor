@@ -1,6 +1,6 @@
 ---
 title: "MCP Tools Reference"
-description: "Per-tool reference for every MCP tool exposed by WorldMonitor — parameters, freshness, API endpoints, and example calls."
+description: "Per-tool reference for every MCP tool World Monitor exposes — parameters, freshness windows, backing API endpoints, and example call payloads."
 ---
 
 Complete reference for every MCP tool. Use this alongside the [MCP Server overview](/mcp-overview) (connection, auth, plans, errors).
@@ -28,6 +28,8 @@ If you've completed the OAuth flow instead, replace `-H "X-WorldMonitor-Key: $WM
 ## Discovering tools
 
 Before diving into the per-tool reference, two affordances make discovery cheaper than reading this page top-to-bottom. If you are starting from a REST route instead of a tool name, use the [API coverage table](/mcp-overview#api-coverage); per-tool **API endpoints** lines mean exact `_apiPaths` declarations, while `none directly` means the tool returns data without claiming an equivalent REST route.
+
+MCP coverage is intentionally curated. Some OpenAPI operations are REST-only because they mutate state, pass through LLM cost, fetch paid/high-cardinality upstreams on cache miss, or need manual cache-key mapping. The [API coverage section](/mcp-overview#api-coverage) names the enforced categories and links the current follow-up trackers.
 
 ### `describe_tool` — full uncompressed definition on demand
 

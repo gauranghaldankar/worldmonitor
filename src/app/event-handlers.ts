@@ -91,9 +91,34 @@ import { t } from '@/services/i18n';
 import { TvModeController } from '@/services/tv-mode';
 import { getAuthState, subscribeAuthState } from '@/services/auth-state';
 import { setTrustedHtml, trustedHtml } from '@/utils/dom-utils';
+import { scheduleAfterFirstPaint } from '@/utils/after-paint';
 import { escapeHtml } from '@/utils/sanitize';
 import { buildEmbedIframeSnippet, buildEmbedMapUrl, type EmbedVariant } from '@/embed/embed-url';
 import { createSettingsButton } from '@/components/settings-button';
+
+function readStorageValue(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeStorageValue(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // UI preferences remain in memory for the current page.
+  }
+}
+
+function removeStorageValue(key: string): void {
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    // Storage is optional for UI preferences.
+  }
+}
 
 type RealUnifiedSettings = import('@/components/UnifiedSettings').UnifiedSettings;
 
@@ -580,8 +605,12 @@ export class EventHandlerManager implements AppModule {
         mode: 'modify',
         existingSpec: spec,
         onComplete: (updated) => {
-          saveWidget(updated);
-          (this.ctx.panels[updated.id] as CustomWidgetPanel | undefined)?.updateSpec(updated);
+          void saveWidget(updated).then(() => {
+            (this.ctx.panels[updated.id] as CustomWidgetPanel | undefined)?.updateSpec(updated);
+          }).catch((error) => {
+            console.error('[widget-chat] failed to save widget', error);
+            showToast(t('widgets.saveFailed'));
+          });
         },
       })).catch((err) => console.error('[widget-chat] failed to lazy-load WidgetChatModal', err));
     }) as EventListener;
@@ -795,10 +824,16 @@ export class EventHandlerManager implements AppModule {
       !loadStoredMissionPreset() &&
       !isMissionPresetPromptDismissed();
     if (shouldPrompt) {
-      window.setTimeout(() => {
+      // Defer the onboarding auto-open to browser idle after first paint so it
+      // never competes with load or first-interaction work. This replaced a
+      // fixed 700ms timeout that forced layout reads (getBoundingClientRect +
+      // offsetHeight) on the post-load path. Re-check state at fire time since
+      // the idle wait can outlast an early user choice.
+      scheduleAfterFirstPaint(() => {
         if (this.ctx.isDestroyed) return;
+        if (loadStoredMissionPreset() || isMissionPresetPromptDismissed()) return;
         this.openMissionPresetPopover(document.getElementById('missionPresetBtn'), false);
-      }, 700);
+      });
     }
   }
 
@@ -1205,10 +1240,11 @@ export class EventHandlerManager implements AppModule {
     // SVG Map fires emitStateChange before the listener is installed — neither
     // can rely on a later onStateChanged to drive the URL write, so they must
     // use the immediate debounce path.
-    const { view, lat, lon, zoom } = this.ctx.initialUrlState ?? {};
+    const { view, lat, lon, zoom, chokepoint } = this.ctx.initialUrlState ?? {};
     const urlHasAsyncFlyTo =
       (lat !== undefined && lon !== undefined) ||   // setCenter → flyTo (requires both)
-      (!view && zoom !== undefined);                // zoom-only → setZoom animated
+      (!view && zoom !== undefined) ||              // zoom-only → setZoom animated
+      chokepoint !== undefined;                     // chokepoint opens after renderer readiness
     if (!urlHasAsyncFlyTo) {
       this.debouncedUrlSync();
     }
@@ -1270,6 +1306,7 @@ export class EventHandlerManager implements AppModule {
       layers: state.layers,
       country: isCountryVisible ? (briefPage?.getCode() ?? undefined) : undefined,
       expanded: isCountryVisible && briefPage?.getIsMaximized?.() ? true : undefined,
+      chokepoint: !isCountryVisible ? (this.ctx.activeChokepoint ?? undefined) : undefined,
     });
   }
 
@@ -1542,7 +1579,7 @@ export class EventHandlerManager implements AppModule {
     await this.exitFullscreenForNavigation();
 
     if (this.ctx.isDesktopApp || options.isLocalDev) {
-      localStorage.setItem('worldmonitor-variant', variant);
+      writeStorageValue('worldmonitor-variant', variant);
       window.location.reload();
       return;
     }
@@ -1767,10 +1804,10 @@ export class EventHandlerManager implements AppModule {
       resetLayout: () => {
         clearPanelSpans();
         clearPanelColSpans();
-        localStorage.removeItem(this.ctx.PANEL_ORDER_KEY);
-        localStorage.removeItem(this.ctx.PANEL_ORDER_KEY + '-bottom');
-        localStorage.removeItem(this.ctx.PANEL_ORDER_KEY + '-bottom-set');
-        localStorage.removeItem('map-height');
+        removeStorageValue(this.ctx.PANEL_ORDER_KEY);
+        removeStorageValue(this.ctx.PANEL_ORDER_KEY + '-bottom');
+        removeStorageValue(this.ctx.PANEL_ORDER_KEY + '-bottom-set');
+        removeStorageValue('map-height');
         window.location.reload();
       },
       isDesktopApp: this.ctx.isDesktopApp,
@@ -1975,7 +2012,7 @@ export class EventHandlerManager implements AppModule {
       }
     };
 
-    const savedHeight = localStorage.getItem('map-height');
+    const savedHeight = readStorageValue('map-height');
     if (savedHeight) {
       const numeric = Number.parseInt(savedHeight, 10);
       if (Number.isFinite(numeric)) {
@@ -1987,10 +2024,10 @@ export class EventHandlerManager implements AppModule {
           mapSection.style.height = `${clamped}px`;
         }
         if (clamped !== numeric) {
-          localStorage.setItem('map-height', `${clamped}px`);
+          writeStorageValue('map-height', `${clamped}px`);
         }
       } else {
-        localStorage.removeItem('map-height');
+        removeStorageValue('map-height');
       }
     }
 
@@ -2007,7 +2044,7 @@ export class EventHandlerManager implements AppModule {
       this.ctx.map?.resize();
       mapSection.classList.remove('resizing');
       document.body.style.cursor = '';
-      localStorage.setItem('map-height', getTarget().style.height);
+      writeStorageValue('map-height', getTarget().style.height);
     };
     const endResize = this.boundMapEndResizeHandler;
 
@@ -2042,7 +2079,7 @@ export class EventHandlerManager implements AppModule {
 
         target.classList.remove('map-section-smooth');
         target.removeEventListener('transitionend', onEnd);
-        localStorage.setItem('map-height', `${finalHeight}px`);
+        writeStorageValue('map-height', `${finalHeight}px`);
         this.ctx.map?.setIsResizing(false);
         this.ctx.map?.resize();
       };
@@ -2080,7 +2117,7 @@ export class EventHandlerManager implements AppModule {
     const widthHandle = document.getElementById('mapWidthResizeHandle');
     if (!mainContent || !widthHandle) return;
 
-    const saved = localStorage.getItem('map-col-width');
+    const saved = readStorageValue('map-col-width');
     if (saved) mainContent.style.setProperty('--map-col-width', saved);
 
     let isResizing = false;
@@ -2096,7 +2133,7 @@ export class EventHandlerManager implements AppModule {
       document.body.classList.remove('map-width-resizing');
       widthHandle.classList.remove('resizing');
       const current = mainContent.style.getPropertyValue('--map-col-width');
-      if (current) localStorage.setItem('map-col-width', current);
+      if (current) writeStorageValue('map-col-width', current);
     };
 
     widthHandle.addEventListener('mousedown', (e) => {
@@ -2129,7 +2166,7 @@ export class EventHandlerManager implements AppModule {
     const pinBtn = document.getElementById('mapPinBtn');
     if (!mapSection || !pinBtn) return;
 
-    const isPinned = localStorage.getItem('map-pinned') === 'true';
+    const isPinned = readStorageValue('map-pinned') === 'true';
     if (isPinned) {
       mapSection.classList.add('pinned');
       pinBtn.classList.add('active');
@@ -2138,7 +2175,7 @@ export class EventHandlerManager implements AppModule {
     pinBtn.addEventListener('click', () => {
       const nowPinned = mapSection.classList.toggle('pinned');
       pinBtn.classList.toggle('active', nowPinned);
-      localStorage.setItem('map-pinned', String(nowPinned));
+      writeStorageValue('map-pinned', String(nowPinned));
     });
 
     this.setupMapFullscreen(mapSection);

@@ -18,9 +18,15 @@ import { timingSafeEqualSecret } from '../api/_crypto.js';
 // @ts-expect-error — JS module, no declaration file
 import { captureSilentError } from '../api/_sentry-edge.js';
 import { mapErrorToResponse } from './error-mapper';
-import { checkRateLimit, checkEndpointRateLimit, hasEndpointRatePolicy } from './_shared/rate-limit';
+import {
+  checkRateLimit,
+  checkEndpointRateLimit,
+  checkFailClosedScopedIpRateLimit,
+  hasEndpointRatePolicy,
+} from './_shared/rate-limit';
 import { drainResponseHeaders, drainSuccessStatusOverride } from './_shared/response-headers';
 import { projectJsonResponse } from './_shared/response-projection';
+import { getRpcNoStoreReasonFromJson } from './_shared/cache-contract';
 import { checkEntitlementDetailed, getRequiredTier, getEntitlements, type CachedEntitlements } from './_shared/entitlement-check';
 import { resolveClerkSession } from './_shared/auth-session';
 import {
@@ -404,6 +410,7 @@ export const PUBLIC_NO_AUTH_RPC_PATHS = new Set<string>([
 export const RELAY_WARM_PING_PATHS = new Set<string>([
   '/api/infrastructure/v1/list-service-statuses',
   '/api/infrastructure/v1/get-cable-health',
+  '/api/infrastructure/v1/list-temporal-anomalies',
   '/api/intelligence/v1/get-risk-scores',
   '/api/supply-chain/v1/get-chokepoint-status',
 ]);
@@ -1065,6 +1072,7 @@ export function createDomainGateway(
     const requiresDirectLlmQuota = !internalMcpVerified && await shouldReserveGatewayDirectLlmQuota(request, pathname);
     const isTierGated = !internalMcpVerified && !isPublicNoAuthRpc && !seedRefreshVerified && !relayWarmPingVerified && getRequiredTier(pathname) !== null;
     const needsLegacyProBearerGate = !internalMcpVerified && !isPublicNoAuthRpc && PREMIUM_RPC_PATHS.has(pathname) && !isTierGated;
+    let endpointRateLimitPrincipalUserId: string | undefined;
 
     // Session resolution — extract userId from bearer token (Clerk JWT) if present.
     // Only runs for tier-gated or direct-LLM endpoints to avoid JWKS lookup on every request.
@@ -1279,6 +1287,53 @@ export function createDomainGateway(
           ? markAuthErrorNoStore(entitlementResponse)
           : entitlementResponse;
       }
+
+      // #5206: summarize refreshes from multiple active Pro users can share a
+      // NAT/public IP and collectively exhaust the endpoint's 30/min abuse
+      // bucket. Keep the exact same fail-closed endpoint policy, but isolate
+      // confirmed active paid principals. Signed-in free, anonymous, expired,
+      // and unresolvable callers deliberately retain the per-IP bucket.
+      // requiresDirectLlmQuota intentionally limits this exception to
+      // spend-bearing summarize requests: translate/malformed requests do not
+      // spend direct LLM quota and keep ordinary per-IP behavior, while cache
+      // lookup is handled by its distinct route.
+      if (
+        pathname === '/api/news/v1/summarize-article' &&
+        requiresDirectLlmQuota &&
+        sessionUserId
+      ) {
+        // This guard runs before the entitlement lookup needed to choose the
+        // final endpoint bucket. Its distinct 600/min IP namespace matches the
+        // repo-wide global ceiling (20x the endpoint's 30/min spend cap): enough
+        // NAT headroom for legitimate Pro refreshes, while bounding per-IP
+        // entitlement-I/O amplification and failing closed when Redis degrades.
+        const attributionGuardResponse = await checkFailClosedScopedIpRateLimit(
+          request,
+          'summarize-article:principal-attribution',
+          600,
+          '60 s',
+          corsHeaders,
+        );
+        if (attributionGuardResponse) {
+          const reason =
+            attributionGuardResponse.status === 503 &&
+            attributionGuardResponse.headers.get('X-RateLimit-Mode') === 'degraded'
+              ? 'rate_limit_degraded'
+              : 'rate_limit_429';
+          emitRequest(attributionGuardResponse.status, reason, null);
+          return attributionGuardResponse;
+        }
+
+        const ent = entitlementCheck.entitlements ?? (
+          userKeyEntitlement !== undefined
+            ? userKeyEntitlement
+            : await getEntitlements(sessionUserId)
+        );
+        recordUsageEntitlement(ent);
+        if (ent && ent.features.tier >= 1 && ent.validUntil >= Date.now()) {
+          endpointRateLimitPrincipalUserId = sessionUserId;
+        }
+      }
     }
 
     // Route matching — if POST doesn't match, convert to GET for stale clients
@@ -1390,7 +1445,11 @@ export function createDomainGateway(
     // limiter here would create misleading double-counting and could 429
     // legitimate Pro tool fetches that pass the upstream cap.
     if (!internalMcpVerified) {
-      const endpointRlResponse = await checkEndpointRateLimit(request, pathname, corsHeaders);
+      const endpointRlResponse = endpointRateLimitPrincipalUserId
+        ? await checkEndpointRateLimit(request, pathname, corsHeaders, {
+            principalUserId: endpointRateLimitPrincipalUserId,
+          })
+        : await checkEndpointRateLimit(request, pathname, corsHeaders);
       if (endpointRlResponse) {
         const reason =
           endpointRlResponse.status === 503 &&
@@ -1469,7 +1528,7 @@ export function createDomainGateway(
                 headers: {
                   'Content-Type': 'application/json',
                   'Cache-Control': 'no-store',
-                  ...rateLimitHeaders({ limit: burst.limit, remaining: 0, resetMs: burst.reset, retryAfterSec }),
+                  ...rateLimitHeaders({ limit: burst.limit, remaining: 0, resetMs: burst.reset, retryAfterSec, windowSec: 60 }),
                   ...corsHeaders,
                 },
               });
@@ -1496,6 +1555,8 @@ export function createDomainGateway(
                       remaining: 0,
                       resetMs: Date.now() + meter.retryAfterSec * 1000,
                       retryAfterSec: meter.retryAfterSec,
+                      // Daily ceiling window (24 h) for the advertised policy.
+                      windowSec: 86_400,
                     }),
                     ...corsHeaders,
                   },
@@ -1626,33 +1687,10 @@ export function createDomainGateway(
     if (response.status === 200 && request.method === 'GET' && response.body) {
       const bodyBytes = await response.arrayBuffer();
 
-      // Skip CDN caching for upstream-unavailable / empty responses so CF
-      // doesn't serve stale error data for hours.
-      //
-      // Three field names are in active use across the RPC handlers because the
-      // codebase grew three fallback conventions in parallel:
-      //   - `upstreamUnavailable: true` — used by consumer-prices/intelligence/
-      //     trade handlers that return ad-hoc JSON shapes.
-      //   - `unavailable: true` — proto-typed handlers (every economic RPC
-      //     including get-macro-signals — `bool unavailable = N` in the proto).
-      //   - `dataAvailable: false` — seed-backed handlers that distinguish
-      //     a real empty snapshot from a degraded or missing seed.
-      // The original check only matched the first form, so proto-typed
-      // fallback responses were getting full `medium` cache tier (CF s-maxage
-      // 1200s, browser max-age 1800s). Production incident 2026-05-03: a
-      // 30-min window of auth bug (PR #3541's wm-session interceptor) caused
-      // every macroSignals RPC to return the fallback. Those responses got
-      // cached for 30 min. Even after auth was fixed (PR #3574), browsers
-      // and CF POPs kept serving "Upstream API unavailable" until the cache
-      // TTL expired naturally — 30 min of false-bad UX per affected user.
-      // Detecting all three field names closes that window.
       const bodyStr = new TextDecoder().decode(bodyBytes);
-      const isUpstreamUnavailable =
-        bodyStr.includes('"upstreamUnavailable":true') ||
-        bodyStr.includes('"unavailable":true') ||
-        bodyStr.includes('"dataAvailable":false');
+      const noStoreReason = getRpcNoStoreReasonFromJson(bodyStr, { pathname });
 
-      if (mergedHeaders.get('X-No-Cache') || isUpstreamUnavailable) {
+      if (mergedHeaders.get('X-No-Cache') || noStoreReason) {
         mergedHeaders.set('Cache-Control', 'no-store');
         mergedHeaders.delete('CDN-Cache-Control');
         mergedHeaders.delete('Vercel-CDN-Cache-Control');

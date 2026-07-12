@@ -110,7 +110,7 @@ function constantTimeEqual(a: string, b: string): boolean {
 // CF_EDGE_PROOF_SECRET is unset, do not trust cf-connecting-ip; fall back to
 // x-real-ip/UNKNOWN so a missing deployment secret cannot silently reopen
 // GHSA-c267.
-function cfTransitProven(request: Request): boolean {
+export function hasCloudflareTransitProof(request: Request): boolean {
   const secret = (process.env.CF_EDGE_PROOF_SECRET ?? '').trim();
   if (!secret) return false;
   return constantTimeEqual((request.headers.get(CF_EDGE_PROOF_HEADER) ?? '').trim(), secret);
@@ -130,19 +130,33 @@ export function getClientIp(request: Request): string {
   // cf-connecting-ip would otherwise short-circuit past x-real-ip.
   const cf = (request.headers.get('cf-connecting-ip') ?? '').trim();
   const xr = (request.headers.get('x-real-ip') ?? '').trim();
-  if (cf && cfTransitProven(request)) return cf;
+  if (cf && hasCloudflareTransitProof(request)) return cf;
   return xr || UNKNOWN_CLIENT_IP;
 }
 
-function tooManyRequestsResponse(limit: number, reset: number, corsHeaders: Record<string, string>): Response {
+function tooManyRequestsResponse(limit: number, reset: number, corsHeaders: Record<string, string>, windowSeconds: number): Response {
+  // `reset` is a Unix epoch in MILLISECONDS (Upstash). IETF RateLimit fields
+  // carry a delta-seconds reset (`t` / RateLimit-Reset), NOT an epoch — derive
+  // it here. Legacy X-RateLimit-Reset stays epoch-ms for back-compat.
+  const resetSeconds = Math.max(0, Math.ceil((reset - Date.now()) / 1000));
   return new Response(JSON.stringify({ error: 'Too many requests' }), {
     status: 429,
     headers: {
       'Content-Type': 'application/json',
+      // IETF RateLimit fields (draft-ietf-httpapi-ratelimit-headers). The
+      // combined RateLimit member references the "default" policy advertised on
+      // every API response via vercel.json so agents can self-throttle. Mirrors
+      // api/_rate-limit.js.
+      'RateLimit-Policy': `"default";q=${limit};w=${windowSeconds}`,
+      'RateLimit-Limit': String(limit),
+      'RateLimit-Remaining': '0',
+      'RateLimit-Reset': String(resetSeconds),
+      RateLimit: `"default";r=0;t=${resetSeconds}`,
+      // Legacy X-RateLimit-* retained for back-compat (Reset is epoch-ms).
       'X-RateLimit-Limit': String(limit),
       'X-RateLimit-Remaining': '0',
       'X-RateLimit-Reset': String(reset),
-      'Retry-After': String(Math.ceil((reset - Date.now()) / 1000)),
+      'Retry-After': String(resetSeconds),
       ...corsHeaders,
     },
   });
@@ -171,6 +185,16 @@ export interface RateLimitOptions {
   failClosed?: boolean;
 }
 
+export interface EndpointRateLimitOptions extends RateLimitOptions {
+  /**
+   * Optional trusted server-derived user ID for endpoint policies that should
+   * isolate authenticated principals sharing one public IP. Callers must never
+   * pass a raw client-controlled header here. The limiter owns the namespace
+   * prefix so user IDs cannot collide with anonymous IP buckets.
+   */
+  principalUserId?: string;
+}
+
 export async function checkRateLimit(request: Request, corsHeaders: Record<string, string>, opts: RateLimitOptions = {}): Promise<Response | null> {
   const rl = getRatelimit();
   if (!rl) {
@@ -187,7 +211,7 @@ export async function checkRateLimit(request: Request, corsHeaders: Record<strin
     const { success, limit, reset } = await limitWithFallback(rl, ip, `rl:fw:${ip}`, GLOBAL_RATE_LIMIT, GLOBAL_RATE_WINDOW_SECONDS);
 
     if (!success) {
-      return tooManyRequestsResponse(limit, reset, corsHeaders);
+      return tooManyRequestsResponse(limit, reset, corsHeaders, GLOBAL_RATE_WINDOW_SECONDS);
     }
 
     return null;
@@ -391,7 +415,7 @@ export function hasEndpointRatePolicy(pathname: string): boolean {
   return pathname in ENDPOINT_RATE_POLICIES;
 }
 
-export async function checkEndpointRateLimit(request: Request, pathname: string, corsHeaders: Record<string, string>, opts: RateLimitOptions = {}): Promise<Response | null> {
+export async function checkEndpointRateLimit(request: Request, pathname: string, corsHeaders: Record<string, string>, opts: EndpointRateLimitOptions = {}): Promise<Response | null> {
   if (!hasEndpointRatePolicy(pathname)) return null;
 
   const rl = getEndpointRatelimit(pathname);
@@ -404,7 +428,9 @@ export async function checkEndpointRateLimit(request: Request, pathname: string,
     return null;
   }
 
-  const ip = getClientIp(request);
+  const identifier = opts.principalUserId
+    ? `user:${opts.principalUserId}`
+    : `ip:${getClientIp(request)}`;
   const policy = ENDPOINT_RATE_POLICIES[pathname];
   // hasEndpointRatePolicy(pathname) above already guarantees this — the
   // extra check exists only to satisfy noUncheckedIndexedAccess, since TS
@@ -412,10 +438,10 @@ export async function checkEndpointRateLimit(request: Request, pathname: string,
   if (!policy) return null;
 
   try {
-    const { success, limit, reset } = await limitWithFallback(rl, `${pathname}:${ip}`, `rl:ep:fw:${pathname}:${ip}`, policy.limit, durationToSeconds(policy.window));
+    const { success, limit, reset } = await limitWithFallback(rl, `${pathname}:${identifier}`, `rl:ep:fw:${pathname}:${identifier}`, policy.limit, durationToSeconds(policy.window));
 
     if (!success) {
-      return tooManyRequestsResponse(limit, reset, corsHeaders);
+      return tooManyRequestsResponse(limit, reset, corsHeaders, durationToSeconds(policy.window));
     }
 
     return null;
@@ -499,6 +525,27 @@ export async function checkScopedRateLimit(scope: string, limit: number, window:
     logRateLimitDegraded(`checkScopedRateLimit:${scope}`, err);
     return { allowed: true, limit, reset: 0, degraded: true };
   }
+}
+
+/**
+ * Applies a distinct, fail-closed per-IP scoped guard and converts its result
+ * into the gateway's standard 429/503 response contract. Use this ahead of
+ * expensive identity-attribution lookups that cannot yet use the endpoint's
+ * final principal-scoped bucket.
+ */
+export async function checkFailClosedScopedIpRateLimit(
+  request: Request,
+  scope: string,
+  limit: number,
+  window: Duration,
+  corsHeaders: Record<string, string>,
+): Promise<Response | null> {
+  const result = await checkScopedRateLimit(scope, limit, window, getClientIp(request));
+  if (result.degraded) return rateLimitDegradedResponse(corsHeaders);
+  if (!result.allowed) {
+    return tooManyRequestsResponse(result.limit, result.reset, corsHeaders, durationToSeconds(window));
+  }
+  return null;
 }
 
 export function __resetRateLimitForTest(): void {

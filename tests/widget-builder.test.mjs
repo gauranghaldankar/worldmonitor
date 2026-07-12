@@ -542,6 +542,22 @@ describe('panel guardrails — cw- prefix handling', () => {
     );
   });
 
+  it('shows an accessible save failure message when widget persistence rejects', () => {
+    assert.match(
+      events,
+      /failed to save widget[\s\S]{0,220}showToast\(t\('widgets\.saveFailed'\)\)/,
+      'Modifying a widget must surface a rejected save to the user',
+    );
+    const createFailureHandlers = layout.match(
+      /failed to add widget[\s\S]{0,220}showToast\(t\('widgets\.saveFailed'\)\)/g,
+    ) ?? [];
+    assert.equal(
+      createFailureHandlers.length,
+      2,
+      'Both widget create entry points must surface a rejected save to the user',
+    );
+  });
+
   it('panel-layout loads widgets when feature is enabled', () => {
     assert.ok(
       layout.includes('hasPremiumAccess') || layout.includes('isProUser'),
@@ -821,6 +837,7 @@ describe('i18n — widgets section completeness', () => {
     'preflightInvalidKey',
     'preflightUnavailable',
     'preflightAiUnavailable',
+    'saveFailed',
     'readyToGenerate',
     'readyToApply',
     'modifyHint',
@@ -1336,7 +1353,7 @@ describe('PRO widget — store and sanitizer', () => {
   });
 
   it('widget sandbox behavior accepts Vercel previews and blocks spoofed parents', () => {
-    const script = sandbox.match(/<script>\n([\s\S]*)\n<\/script>/)?.[1];
+    const script = sandbox.match(/<script>\r?\n([\s\S]*?)\r?\n<\/script>/)?.[1];
     assert.ok(script, 'sandbox inline script not found');
 
     function runSandbox(referrer) {

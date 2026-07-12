@@ -9,7 +9,10 @@ import {
   buildPublishedForecastPayload,
 } from '../scripts/seed-forecasts.mjs';
 
-import { attachResolutionSpecs } from '../scripts/_forecast-resolution.mjs';
+import {
+  CONFLICT_COUNT_SOURCE_FEED,
+  attachResolutionSpecs,
+} from '../scripts/_forecast-resolution.mjs';
 
 import {
   selectBenchmarkCandidates,
@@ -331,8 +334,8 @@ describe('forecast benchmark promotion', () => {
 // the makePrediction default, and the camelCase resolution + projections
 // blocks in both the canonical payload and the 45-day history entry.
 
-// A conflict forecast reaching the hard path needs a ucdp/cii signal with a
-// finite count; a commodity market forecast needs an inputs feed with the
+// A conflict forecast reaching the hard path needs a count-bearing signal;
+// a commodity market forecast needs an inputs feed with the
 // mapped future ticker priced. Kept minimal + console-quiet.
 const HARD_CONFLICT_GENERATED_AT = 1_700_000_000_000;
 
@@ -346,7 +349,8 @@ describe('forecast resolution spec round-trip (U3)', () => {
   it('a hard spec survives buildHistoryForecastEntry -> JSON -> parse with camelCase fields intact', () => {
     const pred = makeHardConflictPred();
     pred.projections = { h24: 0.6, d7: 0.64, d30: 0.7 };
-    attachResolutionSpecs([pred], {}, HARD_CONFLICT_GENERATED_AT);
+    // conflict is judged by default (#5136); force the hard path to exercise hard-spec history round-trip.
+    attachResolutionSpecs([pred], {}, HARD_CONFLICT_GENERATED_AT, { conflictCountFeedAvailable: true });
     assert.equal(pred.resolution.kind, 'hard');
 
     const entry = JSON.parse(JSON.stringify(buildHistoryForecastEntry(pred)));
@@ -354,7 +358,7 @@ describe('forecast resolution spec round-trip (U3)', () => {
     assert.equal(entry.resolution.metricKey, pred.resolution.metricKey);
     assert.equal(entry.resolution.operator, '>=');
     assert.ok(Number.isFinite(entry.resolution.threshold));
-    assert.equal(entry.resolution.sourceFeed, 'conflict:ucdp-events:v1');
+    assert.equal(entry.resolution.sourceFeed, CONFLICT_COUNT_SOURCE_FEED);
     assert.equal(entry.resolution.deadline, HARD_CONFLICT_GENERATED_AT + 7 * 24 * 60 * 60 * 1000);
     // camelCase only — no snake_case leaked through the boundary (D6).
     assert.ok(!('metric_key' in entry.resolution));
@@ -400,7 +404,8 @@ describe('forecast resolution spec round-trip (U3)', () => {
 
   it('canonical payload emits a camelCase resolution object for a spec\'d forecast, omits it otherwise', () => {
     const spec = makeHardConflictPred();
-    attachResolutionSpecs([spec], {}, HARD_CONFLICT_GENERATED_AT);
+    // conflict is judged by default (#5136); force the hard path for the camelCase resolution round-trip.
+    attachResolutionSpecs([spec], {}, HARD_CONFLICT_GENERATED_AT, { conflictCountFeedAvailable: true });
     const payload = buildPublishedForecastPayload(spec);
     assert.equal(payload.resolution.kind, 'hard');
     assert.equal(payload.resolution.metricKey, spec.resolution.metricKey);
@@ -477,7 +482,8 @@ describe('forecast resolution seam coverage (U3, R2/D1)', () => {
     };
 
     const batch = [conflictPred, commodityPred, politicalPred, stateDerivedPred];
-    attachResolutionSpecs(batch, inputs, HARD_CONFLICT_GENERATED_AT);
+    // conflict is judged by default (#5136); force its hard path so this mixed batch still exercises hard+judged.
+    attachResolutionSpecs(batch, inputs, HARD_CONFLICT_GENERATED_AT, { conflictCountFeedAvailable: true });
 
     // 100% coverage (R2): every forecast carries a non-null spec.
     assert.equal(batch.every((p) => p.resolution != null), true);

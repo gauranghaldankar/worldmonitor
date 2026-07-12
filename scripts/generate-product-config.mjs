@@ -5,6 +5,7 @@
  * Reads: convex/config/productCatalog.ts
  * Writes:
  *   - src/config/products.generated.ts   (product IDs for dashboard)
+ *   - src/config/product-ids.generated.ts (analytics-safe product ID allowlist)
  *   - pro-test/src/generated/tiers.json  (tier view model for /pro page)
  *   - pro-test/src/locales/*.json       (English pricing feature placeholders)
  *
@@ -44,11 +45,19 @@ const productEntries = Object.entries(PRODUCT_CATALOG)
   })
   .join('\n');
 
+const planLimitEntries = Object.entries(PRODUCT_CATALOG)
+  .map(([key, e]) => `  ${JSON.stringify(key)}: ${JSON.stringify(e.features.planLimits ?? null)},`)
+  .join('\n');
+
 const productsTs = `// AUTO-GENERATED from convex/config/productCatalog.ts
 // Do not edit manually. Run: npx tsx scripts/generate-product-config.mjs
 
 export const DODO_PRODUCTS = {
 ${productEntries}
+} as const;
+
+export const PLAN_LIMITS = {
+${planLimitEntries}
 } as const;
 
 /** Default product for upgrade CTAs (Pro Monthly). */
@@ -58,6 +67,22 @@ export const DEFAULT_UPGRADE_PRODUCT = DODO_PRODUCTS.PRO_MONTHLY;
 const productsPath = join(ROOT, 'src/config/products.generated.ts');
 writeFileSync(productsPath, productsTs);
 console.log(`  ✓ ${productsPath}`);
+
+const productIdsTs = `// AUTO-GENERATED from convex/config/productCatalog.ts
+// Do not edit manually. Run: npx tsx scripts/generate-product-config.mjs
+
+/** Product IDs accepted by client-side analytics without loading checkout config. */
+export const DODO_PRODUCT_IDS: ReadonlySet<string> = new Set([
+${Object.values(PRODUCT_CATALOG)
+  .filter((entry) => entry.dodoProductId)
+  .map((entry) => `  '${entry.dodoProductId}',`)
+  .join('\n')}
+]);
+`;
+
+const productIdsPath = join(ROOT, 'src/config/product-ids.generated.ts');
+writeFileSync(productIdsPath, productIdsTs);
+console.log(`  ✓ ${productIdsPath}`);
 
 // ---------------------------------------------------------------------------
 // 1b. Generate api/_product-fallback-prices.js
@@ -133,6 +158,7 @@ for (const [tierGroup, entries] of tierGroups) {
 
   tier.description = getDescription(primary.tierGroup);
   tier.features = marketingFeatures;
+  tier.planLimits = primary.features.planLimits ?? null;
   if (localeFeaturesByKey[localeKey]) {
     throw new Error(`[product-config] Duplicate pro locale tier key "${localeKey}" generated for public tier group "${tierGroup}".`);
   }

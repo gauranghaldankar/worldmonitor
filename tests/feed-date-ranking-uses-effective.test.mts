@@ -48,7 +48,7 @@ interface AllowEntry {
 const ALLOW_LIST: AllowEntry[] = [
   {
     file: 'src/services/rss.ts',
-    line: 315,
+    line: 337,
     reason: 'mlWorker.vectorStoreIngest stores pubDate as embedding metadata; not used as a freshness comparator.',
   },
   {
@@ -93,12 +93,12 @@ const ALLOW_LIST: AllowEntry[] = [
   },
   {
     file: 'src/services/trending-keywords.ts',
-    line: 271,
+    line: 276,
     reason: 'headlineKey identity computation — used for dedupe, not freshness ranking.',
   },
   {
     file: 'src/services/trending-keywords.ts',
-    line: 390,
+    line: 395,
     reason: 'publishedAt record-keeping in headline registry; not a freshness comparator.',
   },
 ];
@@ -138,7 +138,8 @@ function listTsFiles(dir: string): string[] {
 }
 
 function isAllowed(file: string, line: number): boolean {
-  return ALLOW_LIST.some((a) => a.file === file && a.line === line);
+  const normFile = file.replace(/\\/g, '/');
+  return ALLOW_LIST.some((a) => a.file === normFile && a.line === line);
 }
 
 describe('feed-date freshness guardrail — effectivePubDateMs usage', () => {
@@ -164,7 +165,7 @@ describe('feed-date freshness guardrail — effectivePubDateMs usage', () => {
     for (const dir of SCAN_DIRS) {
       for (const file of listTsFiles(dir)) {
         const src = readFileSync(resolve(repoRoot, file), 'utf8');
-        const lines = src.split('\n');
+        const lines = src.split(/\r?\n/);
         for (let i = 0; i < lines.length; i++) {
           const text = lines[i]!;
           if (!PUBDATE_GETTIME_RE.test(text)) continue;
@@ -203,7 +204,7 @@ describe('feed-date freshness guardrail — effectivePubDateMs usage', () => {
     const stale: string[] = [];
     for (const entry of ALLOW_LIST) {
       const src = readFileSync(resolve(repoRoot, entry.file), 'utf8');
-      const lines = src.split('\n');
+      const lines = src.split(/\r?\n/);
       const line = lines[entry.line - 1];
       // Comments don't count as legitimate allow-list anchors — they don't
       // execute. A pin to a comment line is always wrong.

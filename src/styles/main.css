@@ -852,20 +852,45 @@ canvas,
   animation: none;
 }
 
+/* Out of flow (fixed, bottom) so inserting/removing the connectivity banner never
+   reflows the #tabs/#main/#panelsGrid column. In-flow it was inserted afterend of
+   .header and toggled during boot on slow connections (cached -> live), shoving the
+   whole column ~83px and generating field CLS (#4580: #panelsGrid/#main top offenders).
+   Bottom-fixed matches the .toast-notification convention; the panel nav is top-sticky
+   so there is no persistent bottom bar to collide with. z-index sits above the bottom
+   search FAB (z 500) / footer but below search overlays (z 2000), so
+   `pointer-events: none` is required:
+   the banner is purely informational (role=status, no interactive children), so it must
+   not trap taps meant for the FAB / open search sheet / footer links it overlaps. */
 .cached-mode-banner {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 900;
+  pointer-events: none;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 10px;
   padding: 9px 16px;
-  border-bottom: 1px solid rgba(217, 119, 6, 0.32);
-  background: linear-gradient(180deg, rgba(217, 119, 6, 0.14), rgba(217, 119, 6, 0.08));
+  padding-bottom: calc(9px + env(safe-area-inset-bottom, 0px));
+  border-top: 1px solid rgba(217, 119, 6, 0.32);
+  background: linear-gradient(0deg, rgba(217, 119, 6, 0.14), rgba(217, 119, 6, 0.08));
   color: var(--text);
 }
 
 .cached-mode-banner--unavailable {
-  border-bottom-color: rgba(239, 68, 68, 0.32);
-  background: linear-gradient(180deg, rgba(239, 68, 68, 0.14), rgba(239, 68, 68, 0.08));
+  border-top-color: rgba(239, 68, 68, 0.32);
+  background: linear-gradient(0deg, rgba(239, 68, 68, 0.14), rgba(239, 68, 68, 0.08));
+}
+
+/* Clear the bottom-right search FAB (56px @ right:16px, mobile only) so the
+   fixed banner's wrapped text never sits under it. */
+@media (max-width: 768px) {
+  .cached-mode-banner {
+    padding-right: 84px;
+  }
 }
 
 .cached-mode-banner__badge {
@@ -4279,11 +4304,14 @@ body.live-news-fullscreen-active .panels-grid > *:not(.live-news-fullscreen) {
 }
 
 .category-tag {
+  color: var(--text);
   font-size: 8px;
   padding: 1px 5px;
   border-radius: 3px;
   font-weight: 600;
   border: 1px solid;
+  border-color: var(--category-color);
+  background: var(--category-background);
   text-transform: uppercase;
   letter-spacing: 0.3px;
 }
@@ -4938,6 +4966,7 @@ body.playback-mode .status-dot {
   position: relative;
   overflow: hidden;
   background: var(--map-bg);
+  contain: layout paint;
   /* Let the map library handle all touch gestures (pinch-zoom, pan)
      instead of the browser intercepting them on mobile/Android */
   touch-action: none;
@@ -5000,6 +5029,7 @@ body.playback-mode .status-dot {
   width: 100%;
   height: 100%;
   pointer-events: none;
+  contain: layout paint;
 }
 
 #mapOverlays>* {
@@ -13275,6 +13305,15 @@ a.prediction-link:hover {
   .conflict-click-area {
     min-width: 44px;
     min-height: 44px;
+  }
+
+  .nat-event-marker,
+  .conflict-click-area {
+    transition: opacity 0.2s ease;
+  }
+
+  .nat-event-marker:hover {
+    transform: translate(-50%, -50%) scale(var(--marker-scale, 1));
   }
 
   /* Ensure hotspot container is large enough for touch */
@@ -24544,6 +24583,73 @@ body.map-width-resizing {
   text-transform: uppercase;
   letter-spacing: 0.05em;
   margin-bottom: 6px;
+}
+
+.api-plan-limit-notices {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.api-plan-limit-notice {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, #facc15 35%, var(--border));
+  border-left: 3px solid #facc15;
+  border-radius: 6px;
+  background: color-mix(in srgb, #facc15 8%, transparent);
+}
+
+.api-plan-limit-notice.over_limit,
+.api-plan-limit-notice.sustained_burst {
+  border-color: color-mix(in srgb, var(--semantic-critical) 35%, var(--border));
+  border-left-color: var(--semantic-critical);
+  background: color-mix(in srgb, var(--semantic-critical) 8%, transparent);
+}
+
+.api-plan-limit-notice-main {
+  min-width: 0;
+}
+
+.api-plan-limit-notice-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 4px;
+}
+
+.api-plan-limit-notice-body {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-dim);
+}
+
+.api-plan-limit-notice-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.api-plan-limit-notice-actions .btn {
+  font-size: 12px;
+  padding: 5px 10px;
+  white-space: nowrap;
+}
+
+@media (max-width: 560px) {
+  .api-plan-limit-notice {
+    flex-direction: column;
+  }
+
+  .api-plan-limit-notice-actions {
+    justify-content: flex-start;
+  }
 }
 
 /* ---- Connected MCP clients (Pro tier) ---- */

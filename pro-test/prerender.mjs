@@ -27,7 +27,7 @@ const WM_SAMEAS = [
   'https://x.com/worldmonitorai',
   'https://x.com/eliehabib',
   'https://discord.gg/re63kWKxaz',
-  'https://www.wired.me/story/the-music-streaming-ceo-who-built-a-global-war-map',
+  'https://www.wired.com/story/world-monitor-elie-habib/',
 ];
 const ORGANIZATION_JSONLD = `    <script type="application/ld+json" nonce="${STATIC_SCRIPT_NONCE}">${JSON.stringify({
   '@context': 'https://schema.org',
@@ -312,7 +312,7 @@ const indexContent = `
     <li><a href="https://www.worldmonitor.app/blog/posts/what-is-worldmonitor-real-time-global-intelligence/">What is World Monitor?</a></li>
     <li><a href="https://www.worldmonitor.app/blog/posts/build-on-worldmonitor-developer-api-open-source/">Build on World Monitor — developer API &amp; MCP</a></li>
     <li><a href="https://github.com/koala73/worldmonitor">Open source on GitHub (AGPL-3.0)</a></li>
-    <li><a href="https://www.wired.me/story/the-music-streaming-ceo-who-built-a-global-war-map">Featured in WIRED</a></li>
+    <li><a href="https://www.wired.com/story/world-monitor-elie-habib/">Featured in WIRED</a></li>
   </ul>
 </div>
 ${HIDE_SCRIPT}`;
@@ -320,7 +320,7 @@ ${HIDE_SCRIPT}`;
 const welcomeContent = await renderWelcomeRoot();
 
 // Wired feature link, reused below.
-const WIRED_STORY_URL = 'https://www.wired.me/story/the-music-streaming-ceo-who-built-a-global-war-map';
+const WIRED_STORY_URL = 'https://www.wired.com/story/world-monitor-elie-habib/';
 
 // Crawler-facing prose block for welcome.html (served at the apex `/`). Unlike
 // index.html — where the React app REPLACES #root on mount, so the prose can be

@@ -1,4 +1,11 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync as originalReadFileSync, statSync } from 'node:fs';
+function readFileSync(path, options) {
+  const content = originalReadFileSync(path, options);
+  if (typeof content === 'string') {
+    return content.replace(/\r\n/g, '\n');
+  }
+  return content;
+}
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
@@ -281,6 +288,7 @@ describe('Comtrade reporter-code source-of-truth guard', () => {
   function collectRuntimeSources(dir) {
     const out = [];
     for (const name of readdirSync(dir)) {
+      if (name === '_bundle-runner-test-run.mjs' || name.startsWith('_bundle-fixture-')) continue;
       const filePath = join(dir, name);
       const stat = statSync(filePath);
       if (stat.isDirectory()) {
@@ -288,7 +296,9 @@ describe('Comtrade reporter-code source-of-truth guard', () => {
         out.push(...collectRuntimeSources(filePath));
         continue;
       }
-      if (/\.(?:mjs|js|ts)$/.test(name)) out.push(filePath);
+      if (/\.(?:mjs|js|ts)$/.test(name)) {
+        out.push(filePath);
+      }
     }
     return out;
   }
@@ -315,6 +325,13 @@ describe('Comtrade reporter-code source-of-truth guard', () => {
     assert.equal(hasStaleInlineReporterMap("const ISO2_TO_COMTRADE_OVERRIDES = { IN: '699' };"), true);
     assert.equal(hasStaleInlineReporterMap("const COMTRADE_REPORTER_OVERRIDES = { TW: '490' };"), true);
     assert.equal(hasStaleInlineReporterMap("const OTHER_MAP = { IN: '699', TW: '490' };"), false);
+  });
+
+  it('keeps the committed bundle runner in the runtime-source audit', () => {
+    assert.ok(
+      checkedFiles.includes(join(root, 'scripts', '_bundle-runner.mjs')),
+      'the committed bundle runner must remain covered by the runtime-source audit',
+    );
   });
 
   it('does not reintroduce stale inline IN/TW-only reporter maps in runtime sources', () => {

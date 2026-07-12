@@ -1,14 +1,21 @@
 import './styles/base-layer.css';
-import './styles/happy-theme.css';
 import './bootstrap/zod-csp';
+import { SITE_VARIANT } from '@/config/variant';
 import { installLcpAttributionDebug } from '@/bootstrap/lcp-attribution';
 import { markLcpDebug } from '@/utils/lcp-debug';
 import { enqueueSentryCall, installPreInitErrorQueue, scheduleSentryInit } from '@/bootstrap/sentry-defer';
 import { registerClsReporting } from '@/bootstrap/cls-report';
 import { registerInpReporting } from '@/bootstrap/inp-report';
+import { registerLcpReporting } from '@/bootstrap/lcp-report';
 import { initVercelAnalytics } from '@/bootstrap/secondary-startup';
 import { App } from './App';
 import { installUtmInterceptor } from './utils/utm';
+
+if (SITE_VARIANT === 'happy') {
+  // Keeps happy-theme.css off other variants' eager CSS graph. On happy, the
+  // stylesheet applies asynchronously, so a brief base-theme flash is possible.
+  void import('./styles/happy-theme.css');
+}
 
 // Activate the deferred dashboard app stylesheet. The build
 // (deferDashboardStylesheetLinks in vite.config.ts) emits the large dashboard
@@ -48,6 +55,10 @@ registerInpReporting();
 // Report field CLS attribution to Sentry so field-only layout shifts can name
 // their largest shifting element before we scope the layout fix (#4580).
 registerClsReporting();
+
+// Report field LCP attribution to Sentry so the last-mile render-delay work can
+// see the real LCP element plus TTFB / load-delay / load-time / render-delay parts (#5079).
+registerLcpReporting();
 
 // Suppress NotAllowedError from YouTube IFrame API's internal play() — browser autoplay policy,
 // not actionable. The YT IFrame API doesn't expose the play() promise so it leaks as unhandled.
@@ -198,6 +209,12 @@ function shouldSuppressCspViolation(
       // accounts.google.com / support.google.com SURFACED: a future first-party
       // Google sign-in embed regression must not be masked.
       if (frameHost.endsWith('.clients6.google.com')) return true;
+      // Tampermonkey "h5player" video-enhancement userscript (large Chinese
+      // install base) frames its own vendor host into every page with a
+      // <video> element. We never reference anzz.site; exact parsed-hostname
+      // match like the vendor rules above so lookalikes still surface
+      // (WORLDMONITOR-HT long tail — 5.8k events / 1.2k users since March).
+      if (frameHost === 'h5player.anzz.site') return true;
     } catch { /* scheme-only values fall through */ }
   }
   // Browser extensions or injected scripts. `ms-browser-extension://` is Edge's
@@ -356,17 +373,19 @@ import { loadDesktopSecrets } from '@/services/runtime-config';
 import { applyStoredTheme } from '@/utils/theme-manager';
 import { applyFont } from '@/services/font-settings';
 import { initAnalytics } from '@/services/analytics';
-import { SITE_VARIANT } from '@/config/variant';
 import { clearChunkReloadGuard, installChunkReloadGuard } from '@/bootstrap/chunk-reload';
+import { initDebugBearRum } from '@/bootstrap/debugbear-rum';
 import { installStaleBundleCheck } from '@/bootstrap/stale-bundle-check';
 import { installSwUpdateHandler } from '@/bootstrap/sw-update';
 
 // Auto-reload on stale chunk 404s after deployment (Vite fires this for modulepreload failures).
 const chunkReloadStorageKey = installChunkReloadGuard(__APP_VERSION__);
 
-// Analytics are secondary startup work: schedule loaders after first paint.
+// Product analytics are secondary startup work; RUM starts once the trusted
+// dashboard entry executes so it can observe page-load vitals.
 void initAnalytics();
 initVercelAnalytics();
+initDebugBearRum();
 
 // Initialize dynamic meta tags for sharing
 initMetaTags();
@@ -403,7 +422,12 @@ requestAnimationFrame(() => {
 });
 
 // Clear stale settings-open flag (survives ungraceful shutdown)
-localStorage.removeItem('wm-settings-open');
+try {
+  localStorage.removeItem('wm-settings-open');
+} catch {
+  // Storage may be unavailable (blocked cookies, sandboxed iframe). The flag is
+  // only a convenience hint, so boot must continue with the in-memory default.
+}
 
 // Standalone windows: ?settings=1 = panel display settings, ?live-channels=1 = channel management
 // Both need i18n initialized so t() does not return undefined.

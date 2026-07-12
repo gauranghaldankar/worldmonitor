@@ -1,6 +1,6 @@
 ---
 title: "Rate Limits"
-description: "Per-endpoint, per-key, and per-IP rate limits across the WorldMonitor API surface."
+description: "Per-endpoint, per-key, and per-IP rate limits across the World Monitor API — headers, 429 handling, and backoff guidance for production clients."
 ---
 
 Rate limits are enforced at the Vercel Edge runtime using Upstash Redis counters. All limits are **sliding 60-second windows** unless noted.
@@ -69,22 +69,41 @@ These mostly use the default public API limit. Cache headers vary by endpoint:
 - `GET /api/health` — `private, no-store, max-age=0` plus `CDN-Cache-Control: no-store`.
 - `GET /api/version` — `public, s-maxage=300, stale-while-revalidate=60, stale-if-error=3600`.
 
+## Rate limit response headers (self-throttle before a 429)
+
+Every `/api/*` response — success or error — advertises the [IETF `RateLimit` header fields](https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/) so an agent can pace itself **before** it trips a 429:
+
+```
+RateLimit-Policy: "default";q=600;w=60
+RateLimit-Limit: 600
+```
+
+- `RateLimit-Policy` — the applicable quota (`q`) over a window of `w` seconds for the default sliding window. Stricter per-endpoint, per-plan, and OAuth limits (see the tables above) apply on those routes.
+- `RateLimit-Limit` — the same quota as a bare integer, for parsers that predate the structured-field draft.
+
+These are static advertisements, so they add no latency on the hot path. The legacy `X-RateLimit-*` names are also emitted for back-compat.
+
 ## Response when limited
 
-HTTP 429 with the standard rate-limit headers so you can self-throttle:
+An HTTP 429 additionally carries the live per-window counters (remaining is `0`; the reset and `Retry-After` are **delta-seconds**) plus the combined `RateLimit` member:
 
 ```
 HTTP/1.1 429 Too Many Requests
+RateLimit-Policy: "default";q=<limit>;w=<window>
+RateLimit-Limit: <limit>
+RateLimit-Remaining: 0
+RateLimit-Reset: <seconds until reset>
+RateLimit: "default";r=0;t=<seconds until reset>
+Retry-After: <seconds>
 X-RateLimit-Limit: <limit>
 X-RateLimit-Remaining: 0
 X-RateLimit-Reset: <reset, ms since epoch>
-Retry-After: <seconds>
 Content-Type: application/json
 
 { "error": "Too many requests" }
 ```
 
-For a daily-ceiling 429 the `Retry-After` counts down to the next 00:00 UTC.
+Note the IETF `RateLimit-Reset` (and the `t` value in the combined `RateLimit` member) is **seconds remaining**, whereas the legacy `X-RateLimit-Reset` is an absolute epoch in **milliseconds**. For a daily-ceiling 429 the `Retry-After` counts down to the next 00:00 UTC.
 
 ## Retry guidance
 
@@ -92,6 +111,24 @@ For a daily-ceiling 429 the `Retry-After` counts down to the next 00:00 UTC.
 - For batch work, pace yourself: at 600 req/min/IP the default gives you ~10 req/s headroom.
 - For MCP, 60/min is generous for conversational use but tight for scripted batch fetches — prefer the REST API for batch.
 - Spurious 429s often mean you're sharing an egress IP (corporate proxy, CI runner). Contact support for a per-key limit bump if needed.
+
+## Customer notifications and paid-plan caps
+
+API and MCP plan caps are tracked against the product catalog limits that ship with entitlements:
+
+| Plan | API requests / day | API burst / minute | MCP calls / day | MCP burst / minute |
+|------|--------------------|--------------------|-----------------|--------------------|
+| Free | 0 | 0 | 0 | 0 |
+| Pro | 0 | 0 | 50 | 60 |
+| API Starter | 1,000 | 60 | 1,000 | 60 |
+| API Business | 10,000 | 300 | 10,000 | 300 |
+| Enterprise | Unlimited | 1,000 | Unlimited | 1,000 |
+
+When a paid user approaches or exceeds one of these limits, WorldMonitor records a compact Convex rollup and opens a current account notice in Settings. The daily count is read from the same per-account meter that governs enforcement, so a warning reflects the same usage number the plan is metered against. Daily limits warn at 80% and switch to over-limit at 100%; burst limits only notify on sustained pressure, not a single isolated spike.
+
+If the notice is still current, a Resend-backed lifecycle sends an email at a bounded cadence. The email and dashboard notice explain the current usage, the relevant plan limit, and the available options: reduce traffic, wait for reset, upgrade when a self-serve path exists, or contact support when the next tier is not self-serve.
+
+WorldMonitor does **not** automatically upgrade a user, charge for overages, or move a customer into API Business because they crossed a cap. Any future hard enforcement for paid plans must first pass the internal `apiPlanLimitNotices.getEnforcementReadiness` gate: no stale usage source, no pending/failed email, and no blocked self-serve upgrade path.
 
 ## Hard caps (not soft limits)
 

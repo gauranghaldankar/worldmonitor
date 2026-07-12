@@ -8,6 +8,9 @@
  * occurs. Reporting interaction target + the three INP sub-parts lets us see
  * which real interaction is slow and whether the cost is input delay,
  * processing, or presentation — the data that drives fix prioritization.
+ * Good-rated events are trimmed (#4565), so captured-event p75 is conditioned
+ * on the bad tail. Verify fixes with bad-event rate per formFactor plus
+ * weekly page-level CrUX queryHistoryRecord, not p75 of captured Sentry events.
  *
  * The `onINP` registration that calls this lives behind the `web-vitals`
  * dependency (see `registerInpReporting` doc at the bottom). This module keeps
@@ -15,7 +18,12 @@
  * without the package present.
  */
 import { enqueueSentryCall } from '@/bootstrap/sentry-defer';
-import { roundMs } from '@/bootstrap/web-vitals-utils';
+import {
+  getWebVitalsFormFactor,
+  roundMs,
+  shouldSampleWebVital,
+  WEB_VITAL_SAMPLE_RATE,
+} from '@/bootstrap/web-vitals-utils';
 
 /** Structural subset of web-vitals' INP attribution (kept local to avoid the dep). */
 export interface InpAttributionLike {
@@ -41,17 +49,24 @@ export interface InpMetricLike {
 export function reportInpMetric(
   metric: InpMetricLike,
   enqueue: typeof enqueueSentryCall = enqueueSentryCall,
+  keep: () => boolean = shouldSampleWebVital,
 ): void {
   // Volume trim (#4565): skip 'good' (<200ms) INP — ~70% of field events, low
   // diagnostic value. Report needs-improvement / poor / unknown only, so the
   // actionable worst-case signal still lands while Sentry event volume drops ~70%.
   if (metric.rating === 'good') return;
+  // Uniform sample of the surviving bad tail (~50% poor here) to cut Sentry
+  // volume ~80% without biasing the rating/formFactor/target distributions.
+  if (!keep()) return;
   const a = metric.attribution ?? {};
+  const formFactor = getWebVitalsFormFactor();
   enqueue((s) => {
     s.captureMessage('web-vital: INP', {
       level: 'info',
       tags: {
         webvital: 'inp',
+        formFactor,
+        sampleRate: String(WEB_VITAL_SAMPLE_RATE),
         'inp.rating': metric.rating ?? 'unknown',
         'inp.interactionType': a.interactionType ?? 'unknown',
       },

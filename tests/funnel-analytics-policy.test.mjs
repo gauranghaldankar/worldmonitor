@@ -70,6 +70,17 @@ test('/pro and welcome pages load the Umami tracker (www + nonce)', () => {
   }
 });
 
+test('/pro and welcome entries initialize DebugBear RUM', () => {
+  for (const entry of ['pro-test/src/main.tsx', 'pro-test/src/welcome-main.tsx']) {
+    const src = read(entry);
+    assert.ok(
+      src.includes("import { initDebugBearRum } from './debugbear-rum'"),
+      `${entry}: DebugBear RUM import missing`,
+    );
+    assert.ok(src.includes('initDebugBearRum();'), `${entry}: DebugBear RUM init missing`);
+  }
+});
+
 test('/pro checkout service fires checkout-start on both paths', () => {
   const src = read('pro-test/src/services/checkout.ts');
   // Round-2 F4 (Greptile): asserting only the surface labels would still
@@ -115,8 +126,8 @@ test('checkout-start product ids are bucketed on both surfaces (round-4 F2)', ()
   const analytics = read('src/services/analytics.ts');
   assert.ok(analytics.includes('bucketProductIdForAnalytics(productId)'),
     'dashboard trackCheckoutStart no longer buckets the (resume-path URL-derived) productId');
-  assert.ok(analytics.includes('Object.values(DODO_PRODUCTS)'),
-    'dashboard product allowlist no longer derives from the generated catalog');
+  assert.ok(analytics.includes("from '@/config/product-ids.generated'") && analytics.includes('DODO_PRODUCT_IDS'),
+    'dashboard product allowlist must keep deriving from the generated catalog');
   const pro = read('pro-test/src/services/checkout.ts');
   const emissions = pro.match(/trackFunnelEvent\(\s*'checkout-start'[\s\S]{0,300}?\}\s*\)/g) ?? [];
   assert.equal(emissions.length, 2, 'expected exactly two /pro checkout-start emissions');

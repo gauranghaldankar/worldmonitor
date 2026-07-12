@@ -1,20 +1,106 @@
 /**
  * Product catalog freshness tests.
  *
- * Verifies that generated files (products.generated.ts, tiers.json)
+ * Verifies that generated files (products.generated.ts, product-ids.generated.ts, tiers.json)
  * match the canonical catalog in convex/config/productCatalog.ts.
  * Bidirectional: checks generated→catalog AND catalog→generated.
  */
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execSync } from 'node:child_process';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
+
+const PRODUCT_ID_ALLOWED_EXTENSIONS = ['.ts', '.tsx', '.mjs', '.js'];
+const PRODUCT_ID_EXCLUDE_PATTERNS = [
+  'node_modules',
+  'dist/',
+  '.git',
+  '.claude/worktrees/',
+  'convex/_generated/',
+  'convex/config/productCatalog',
+  'api/product-catalog',
+  'api/_product-fallback-prices',
+  'src/config/products.generated',
+  'src/config/product-ids.generated',
+  'pro-test/src/generated/',
+  'public/pro/',
+  'tests/',
+  'convex/__tests__/',
+  'scripts/generate-product-config',
+];
+
+function isMissingPathError(error) {
+  return error && typeof error === 'object' && error.code === 'ENOENT';
+}
+
+function collectRawProductIds(root, filesystem = {}) {
+  const {
+    readdir = readdirSync,
+    stat = statSync,
+    readFile = readFileSync,
+  } = filesystem;
+  const results = [];
+
+  function walk(currentDir) {
+    let entries;
+    try {
+      entries = readdir(currentDir);
+    } catch (error) {
+      if (isMissingPathError(error)) return;
+      throw error;
+    }
+
+    for (const entry of entries) {
+      const fullPath = join(currentDir, entry);
+      const relPath = relative(root, fullPath).replace(/\\/g, '/');
+      let fileStat;
+      try {
+        fileStat = stat(fullPath);
+      } catch (error) {
+        if (isMissingPathError(error)) continue;
+        throw error;
+      }
+      const checkPath = fileStat.isDirectory() ? `${relPath}/` : relPath;
+
+      if (PRODUCT_ID_EXCLUDE_PATTERNS.some((pattern) => checkPath.includes(pattern))) {
+        continue;
+      }
+
+      if (fileStat.isDirectory()) {
+        walk(fullPath);
+        continue;
+      }
+
+      const extIdx = entry.lastIndexOf('.');
+      const ext = extIdx !== -1 ? entry.substring(extIdx) : '';
+      if (!PRODUCT_ID_ALLOWED_EXTENSIONS.includes(ext) || entry.includes('.test.')) continue;
+
+      let content;
+      try {
+        content = readFile(fullPath, 'utf8');
+      } catch (error) {
+        if (isMissingPathError(error)) continue;
+        throw error;
+      }
+      if (!content.includes('pdt_')) continue;
+
+      content.split(/\r?\n/).forEach((line, index) => {
+        if (line.includes('pdt_')) {
+          results.push(`${relPath}:${index + 1}:${line}`);
+        }
+      });
+    }
+  }
+
+  walk(root);
+  return results;
+}
 
 describe('Product catalog freshness', () => {
   // Read generated files
@@ -62,6 +148,23 @@ describe('Product catalog freshness', () => {
     assert.ok(api, 'API tier not found');
     assert.ok(typeof api.monthlyPrice === 'number', 'API should have monthlyPrice');
     assert.ok(typeof api.annualPrice === 'number', 'API should have annualPrice');
+  });
+
+  it('generated products.ts includes typed plan limits', () => {
+    assert.match(generatedProductsSrc, /export const PLAN_LIMITS = \{/, 'Missing PLAN_LIMITS export');
+    assert.match(generatedProductsSrc, /"api_starter": \{"apiRequestsPerDay":1000,/, 'API Starter daily limit missing');
+    assert.match(generatedProductsSrc, /"api_business": \{"apiRequestsPerDay":10000,/, 'API Business daily limit missing');
+    assert.match(generatedProductsSrc, /"enterprise": \{"apiRequestsPerDay":null,/, 'Enterprise unlimited daily limit missing');
+  });
+
+  it('generated tiers expose plan limits for public plans', () => {
+    const pro = tiersJson.find(t => t.name === 'Pro');
+    const api = tiersJson.find(t => t.name === 'API');
+    const ent = tiersJson.find(t => t.name === 'Enterprise');
+
+    assert.equal(pro?.planLimits?.mcpCallsPerDay, 50, 'Pro MCP daily limit should be visible');
+    assert.equal(api?.planLimits?.apiRequestsPerDay, 1000, 'API Starter daily limit should be visible');
+    assert.equal(ent?.planLimits?.apiRequestsPerDay, null, 'Enterprise daily limit should be unlimited');
   });
 
   it('Enterprise tier is custom with contact CTA', () => {
@@ -252,6 +355,7 @@ describe('Product catalog freshness', () => {
   it('generated files and pro locale placeholders are fresh (re-running generator produces same output)', () => {
     // Capture current generated content
     const currentProducts = readFileSync(join(ROOT, 'src/config/products.generated.ts'), 'utf8');
+    const currentProductIds = readFileSync(join(ROOT, 'src/config/product-ids.generated.ts'), 'utf8');
     const currentTiers = readFileSync(join(ROOT, 'pro-test/src/generated/tiers.json'), 'utf8');
     const currentFallback = readFileSync(join(ROOT, 'api/_product-fallback-prices.js'), 'utf8');
     const currentLocales = readProLocaleFiles();
@@ -261,11 +365,13 @@ describe('Product catalog freshness', () => {
 
     // Compare
     const freshProducts = readFileSync(join(ROOT, 'src/config/products.generated.ts'), 'utf8');
+    const freshProductIds = readFileSync(join(ROOT, 'src/config/product-ids.generated.ts'), 'utf8');
     const freshTiers = readFileSync(join(ROOT, 'pro-test/src/generated/tiers.json'), 'utf8');
     const freshFallback = readFileSync(join(ROOT, 'api/_product-fallback-prices.js'), 'utf8');
     const freshLocales = readProLocaleFiles();
 
     assert.equal(currentProducts, freshProducts, 'products.generated.ts is stale — run: npx tsx scripts/generate-product-config.mjs');
+    assert.equal(currentProductIds, freshProductIds, 'product-ids.generated.ts is stale — run: npx tsx scripts/generate-product-config.mjs');
     assert.equal(currentTiers, freshTiers, 'tiers.json is stale — run: npx tsx scripts/generate-product-config.mjs');
 
     assert.equal(currentFallback, freshFallback, '_product-fallback-prices.js is stale — run: npx tsx scripts/generate-product-config.mjs');
@@ -343,31 +449,49 @@ describe('Product catalog freshness', () => {
 });
 
 describe('Product ID guard', () => {
-  it('no raw pdt_ strings outside allowed paths', () => {
-    // Allowed paths: catalog, generated files, tests, built assets
-    const result = execSync(
-      `grep -rn 'pdt_' --include='*.ts' --include='*.tsx' --include='*.mjs' --include='*.js' . ` +
-      `| grep -v node_modules ` +
-      `| grep -v './dist/' ` +
-      `| grep -v '.claude/worktrees/' ` +
-      `| grep -v 'convex/_generated/' ` +
-      `| grep -v 'convex/config/productCatalog' ` +
-      `| grep -v 'api/product-catalog' ` +
-      `| grep -v 'api/_product-fallback-prices' ` +
-      `| grep -v 'src/config/products.generated' ` +
-      `| grep -v 'pro-test/src/generated/' ` +
-      `| grep -v 'public/pro/' ` +
-      `| grep -v 'tests/' ` +
-      `| grep -v 'convex/__tests__/' ` +
-      `| grep -v 'scripts/generate-product-config' ` +
-      `| grep -v '.test.' ` +
-      `|| true`,
-      { cwd: ROOT, encoding: 'utf8' },
-    ).trim();
+  it('ignores a file deleted after directory enumeration', () => {
+    const missing = Object.assign(new Error('gone'), { code: 'ENOENT' });
+    const results = collectRawProductIds(ROOT, {
+      readdir: () => ['gone.mjs'],
+      stat: () => { throw missing; },
+    });
 
-    if (result) {
+    assert.deepEqual(results, []);
+  });
+
+  it('does not suppress stable-source read errors', () => {
+    const denied = Object.assign(new Error('permission denied'), { code: 'EACCES' });
+    assert.throws(
+      () => collectRawProductIds(ROOT, {
+        readdir: () => ['unreadable.mjs'],
+        stat: () => ({ isDirectory: () => false }),
+        readFile: () => { throw denied; },
+      }),
+      /permission denied/,
+    );
+  });
+
+  it('ignores generated build artifacts', () => {
+    const distDir = join(ROOT, 'dist');
+    const builtAsset = join(distDir, 'panel.js');
+    const results = collectRawProductIds(ROOT, {
+      readdir: (path) => path === ROOT ? ['dist'] : ['panel.js'],
+      stat: (path) => ({ isDirectory: () => path === distDir }),
+      readFile: (path) => {
+        assert.equal(path, builtAsset);
+        return "const productId = 'pdt_built_artifact';";
+      },
+    });
+
+    assert.deepEqual(results, []);
+  });
+
+  it('no raw pdt_ strings outside allowed paths', () => {
+    const results = collectRawProductIds(ROOT);
+
+    if (results.length > 0) {
       assert.fail(
-        `Found pdt_ strings outside allowed paths. These should import from the catalog:\n${result}`,
+        `Found pdt_ strings outside allowed paths. These should import from the catalog:\n${results.join('\n')}`,
       );
     }
   });

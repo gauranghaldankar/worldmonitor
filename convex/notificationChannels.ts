@@ -1,6 +1,44 @@
 import { ConvexError, v } from "convex/values";
-import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
+import {
+  internalMutation,
+  internalQuery,
+  type MutationCtx,
+  mutation,
+  query,
+} from "./_generated/server";
 import { channelTypeValidator } from "./constants";
+
+/**
+ * Notifications are a PRO feature. Enforce the entitlement at the public
+ * Convex write boundary so callers cannot bypass the edge API gate.
+ */
+async function hasProEntitlement(
+  ctx: MutationCtx,
+  userId: string,
+): Promise<boolean> {
+  const entitlement = await ctx.db
+    .query("entitlements")
+    .withIndex("by_userId", (q) => q.eq("userId", userId))
+    .first();
+  const tier =
+    entitlement && entitlement.validUntil >= Date.now()
+      ? entitlement.features.tier
+      : 0;
+  return tier >= 1;
+}
+
+async function assertProEntitlement(
+  ctx: MutationCtx,
+  userId: string,
+): Promise<void> {
+  if (!(await hasProEntitlement(ctx, userId))) {
+    throw new ConvexError({
+      code: "PRO_REQUIRED",
+      message:
+        "Notifications are a PRO feature. Upgrade to enable real-time and digest alerts.",
+    });
+  }
+}
 
 export const getChannelsByUserId = internalQuery({
   args: { userId: v.string() },
@@ -270,6 +308,7 @@ export const setChannel = mutation({
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) throw new ConvexError("UNAUTHENTICATED");
     const userId = identity.subject;
+    await assertProEntitlement(ctx, userId);
 
     const existing = await ctx.db
       .query("notificationChannels")
@@ -324,6 +363,7 @@ export const deleteChannel = mutation({
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) throw new ConvexError("UNAUTHENTICATED");
     const userId = identity.subject;
+    await assertProEntitlement(ctx, userId);
 
     const existing = await ctx.db
       .query("notificationChannels")
@@ -372,6 +412,7 @@ export const deactivateChannel = mutation({
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) throw new ConvexError("UNAUTHENTICATED");
     const userId = identity.subject;
+    await assertProEntitlement(ctx, userId);
 
     const existing = await ctx.db
       .query("notificationChannels")
@@ -392,6 +433,7 @@ export const createPairingToken = mutation({
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) throw new ConvexError("UNAUTHENTICATED");
     const userId = identity.subject;
+    await assertProEntitlement(ctx, userId);
 
     // Invalidate any existing unused tokens for this user
     const existing = await ctx.db
@@ -435,6 +477,9 @@ export const claimPairingToken = mutation({
     if (!record) return { ok: false, reason: "NOT_FOUND" as const };
     if (record.used) return { ok: false, reason: "ALREADY_USED" as const };
     if (record.expiresAt < Date.now()) return { ok: false, reason: "EXPIRED" as const };
+    if (!(await hasProEntitlement(ctx, record.userId))) {
+      return { ok: false, reason: "PRO_REQUIRED" as const };
+    }
 
     // Mark token used
     await ctx.db.patch(record._id, { used: true });

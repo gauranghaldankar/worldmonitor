@@ -2,6 +2,8 @@ import type { AppContext, AppModule } from '@/app/app-context';
 import { getRpcBaseUrl } from '@/services/rpc-client';
 import { enqueuePanelCall } from '@/app/pending-panel-data';
 import { markLcpDebug } from '@/utils/lcp-debug';
+import { runHydrationTier, type HydrationTask } from '@/app/hydration-scheduler';
+import { yieldToMain } from '@/utils/after-paint';
 import { getSignalAggregator, type SignalAggregator } from '@/app/lazy-services';
 import { getMilitaryVesselsModule, isVesselRuntimeStoppedError } from '@/services/military-vessels-lazy';
 import type { NewsItem, MapLayers, SocialUnrestEvent, MilitaryFlight } from '@/types';
@@ -81,7 +83,7 @@ import { updateAndCheck, consumeServerAnomalies, fetchLiveAnomalies } from '@/se
 import { fetchAllFires, flattenFires, computeRegionStats, toMapFires } from '@/services/wildfires';
 import type { TheaterPostureSummary } from '@/services/military-surge';
 import { fetchCachedTheaterPosture } from '@/services/cached-theater-posture';
-import { ingestProtestsForCII, ingestMilitaryForCII, ingestNewsForCII, ingestOutagesForCII, ingestConflictsForCII, ingestUcdpForCII, ingestHapiForCII, ingestDisplacementForCII, ingestClimateForCII, ingestStrikesForCII, ingestOrefForCII, ingestAviationForCII, ingestAdvisoriesForCII, ingestGpsJammingForCII, ingestAisDisruptionsForCII, ingestSatelliteFiresForCII, ingestCyberThreatsForCII, ingestTemporalAnomaliesForCII, ingestEarthquakesForCII, ingestSanctionsForCII, isInLearningMode, resetHotspotActivity, calculateCII, type CountryScore } from '@/services/country-instability';
+import { ingestProtestsForCII, ingestMilitaryForCII, ingestNewsForCII, ingestOutagesForCII, ingestConflictsForCII, ingestUcdpForCII, ingestHapiForCII, ingestDisplacementForCII, ingestClimateForCII, ingestStrikesForCII, ingestOrefForCII, ingestAviationForCII, ingestAdvisoriesForCII, ingestGpsJammingForCII, ingestAisDisruptionsForCII, ingestSatelliteFiresForCII, ingestCyberThreatsForCII, ingestTemporalAnomaliesForCII, ingestEarthquakesForCII, ingestSanctionsForCII, isInLearningMode, resetHotspotActivity, type CountryScore } from '@/services/country-instability';
 import { fetchGpsInterference } from '@/services/gps-interference';
 import { fetchSatelliteTLEs, initSatRecs, propagatePositions, startPropagationLoop } from '@/services/satellites';
 import type { SatRecEntry } from '@/services/satellites';
@@ -239,11 +241,6 @@ export interface DataLoaderCallbacks {
   refreshOpenCountryBrief: () => void;
 }
 
-type HydrationTask = {
-  name: string;
-  task: () => Promise<void>;
-};
-
 type HydrationTier = 1 | 2 | 3 | 4;
 type DailyMarketBriefModule = typeof import('@/services/daily-market-brief');
 type RssModule = Pick<typeof import('@/services/rss'), 'fetchCategoryFeeds' | 'getFeedFailures'>;
@@ -376,6 +373,16 @@ export class DataLoaderManager implements AppModule {
     enqueuePanelCall(key, method, args);
   }
 
+  private panelHasRetainedData(key: string): boolean {
+    const panel = this.ctx.panels[key] as { hasData?: () => boolean } | undefined;
+    return typeof panel?.hasData === 'function' && panel.hasData();
+  }
+
+  private showColdLoadError(key: string): void {
+    if (this.panelHasRetainedData(key)) return;
+    this.callPanel(key, 'showError');
+  }
+
   private boundMarketWatchlistHandler: (() => void) | null = null;
   private satellitePropagationCleanup: (() => void) | null = null;
   private dailyBriefGeneration = 0;
@@ -383,8 +390,6 @@ export class DataLoaderManager implements AppModule {
   private dailyBriefFrameworkUnsubscribe: (() => void) | null = null;
   private marketImplicationsFrameworkUnsubscribe: (() => void) | null = null;
   private cachedSatRecs: SatRecEntry[] | null = null;
-  private cachedRiskScores: CachedRiskScores | null = null;
-  private preferLocalCii = false;
   private loadAllDataPromise: Promise<void> | null = null;
   private loadAllDataRerunRequested = false;
   private loadAllDataQueuedForceAll = false;
@@ -416,27 +421,17 @@ export class DataLoaderManager implements AppModule {
     performance.mark(label);
   }
 
-  private async yieldHydrationFrame(): Promise<void> {
-    if (typeof window === 'undefined') return;
-    await new Promise<void>(resolve => {
-      const idle = window.requestIdleCallback as ((cb: IdleRequestCallback, opts?: IdleRequestOptions) => number) | undefined;
-      if (idle) {
-        idle(() => resolve(), { timeout: 250 });
-        return;
-      }
-      window.setTimeout(resolve, 16);
-    });
-  }
-
   private async runHydrationTasks(tasks: HydrationTask[], forceAll: boolean): Promise<void> {
     const prioritized = tasks
       .map((task, order) => ({ ...task, order, tier: this.getHydrationTier(task.name) }))
       .sort((a, b) => a.tier - b.tier || a.order - b.order);
 
-    const maxConcurrency = forceAll ? 6 : 3;
+    // On the mobile profile, starting several panel loaders in the same task
+    // lets their dynamic-import evaluation and synchronous render work merge
+    // into one long task. Keep desktop concurrency, but give the browser a
+    // scheduling boundary between every mobile panel in a tier. (#5165)
+    const maxConcurrency = this.ctx.isMobile ? 1 : (forceAll ? 6 : 3);
     const failures: Array<{ name: string; reason: unknown }> = [];
-    let cursor = 0;
-
     this.markHydration(`wm:hydration:${forceAll ? 'force' : 'viewport'}:start`);
 
     for (const tier of HYDRATION_TIERS) {
@@ -444,21 +439,14 @@ export class DataLoaderManager implements AppModule {
       if (tierTasks.length === 0) continue;
 
       this.markHydration(`wm:hydration:tier-${tier}:start`);
-      cursor = 0;
-      while (cursor < tierTasks.length) {
-        const batch = tierTasks.slice(cursor, cursor + maxConcurrency);
-        const results = await Promise.allSettled(batch.map(item => item.task()));
-        results.forEach((result, idx) => {
-          if (result.status === 'rejected') {
-            failures.push({ name: batch[idx]?.name ?? 'unknown', reason: result.reason });
-          }
-        });
-
-        cursor += batch.length;
-        if (cursor < tierTasks.length) await this.yieldHydrationFrame();
-      }
+      await runHydrationTier({
+        tasks: tierTasks,
+        maxConcurrency,
+        yieldToMain,
+        onFailure: (name, reason) => failures.push({ name, reason }),
+      });
       this.markHydration(`wm:hydration:tier-${tier}:end`);
-      if (tier < 4 && prioritized.some(task => task.tier > tier)) await this.yieldHydrationFrame();
+      if (tier < 4 && prioritized.some(task => task.tier > tier)) await yieldToMain();
     }
 
     this.markHydration(`wm:hydration:${forceAll ? 'force' : 'viewport'}:end`);
@@ -502,45 +490,43 @@ export class DataLoaderManager implements AppModule {
     this.marketImplicationsFrameworkUnsubscribe = null;
   }
 
-  private getAuthoritativeCachedRiskScores(forceLocal: boolean): CachedRiskScores | null {
-    if (forceLocal) {
-      this.preferLocalCii = true;
-      this.cachedRiskScores = null;
-      return null;
-    }
-    if (this.preferLocalCii) return null;
-    const cached = this.cachedRiskScores ?? getCachedScores();
+  private getAuthoritativeCachedRiskScores(): CachedRiskScores | null {
+    const cached = getCachedScores();
     return cached?.cii.length ? cached : null;
   }
+
+  private appliedCiiState: CachedRiskScores | null | undefined;
 
   private applyCiiScoresToMap(scores: CountryScore[]): void {
     this.ctx.map?.setCIIScores(scores.map(s => ({ code: s.code, score: s.score, level: s.level })));
     this.ctx.map?.setLayerReady('ciiChoropleth', scores.length > 0);
   }
 
-  private renderCachedCiiScores(cached: CachedRiskScores): void {
-    this.cachedRiskScores = cached;
+  private renderCachedCiiScores(cached: CachedRiskScores): boolean {
+    if (this.appliedCiiState === cached) return false;
+    this.appliedCiiState = cached;
     this.callPanel('cii', 'renderFromCached', cached);
     this.applyCiiScoresToMap(cached.cii.map(toCountryScore));
+    return true;
   }
 
-  private refreshCiiAndBrief(forceLocal = false): void {
-    const cached = this.getAuthoritativeCachedRiskScores(forceLocal);
+  private refreshCiiAndBrief(): void {
+    const cached = this.getAuthoritativeCachedRiskScores();
     if (cached) {
       this.renderCachedCiiScores(cached);
       this.callbacks.refreshOpenCountryBrief();
       return;
     }
 
-    const shouldUseLocalFallback = forceLocal || !this.cachedRiskScores;
-    this.callPanel('cii', 'refresh', shouldUseLocalFallback);
+    if (this.appliedCiiState === null) return;
+    this.appliedCiiState = null;
+    this.callPanel('cii', 'renderUnavailable');
+    this.applyCiiScoresToMap([]);
     this.callbacks.refreshOpenCountryBrief();
-    const scores = calculateCII();
-    this.applyCiiScoresToMap(scores);
   }
 
   public refreshCiiAfterFocalPointsReady(): void {
-    this.refreshCiiAndBrief(false);
+    this.refreshCiiAndBrief();
   }
 
   public refreshGeometryDependentCiiAfterCountryGeometry(): void {
@@ -617,7 +603,7 @@ export class DataLoaderManager implements AppModule {
     }
 
     markLcpDebug('wm:data:country-geometry-replay-ready', { replayed });
-    if (replayed > 0) this.refreshCiiAndBrief(false);
+    if (replayed > 0) this.refreshCiiAndBrief();
   }
 
   private async tryFetchDigest(): Promise<ListFeedDigestResponse | null> {
@@ -848,6 +834,7 @@ export class DataLoaderManager implements AppModule {
           const givingResult = await fetchGivingSummary();
           if (!givingResult.ok) {
             dataFreshness.recordError('giving', 'Giving data unavailable (retaining prior state)');
+            this.showColdLoadError('giving');
             return;
           }
           const data = givingResult.data;
@@ -2634,6 +2621,7 @@ export class DataLoaderManager implements AppModule {
           // listUcdpEvents is a pure Redis-read (gold standard). Retrying returns
           // the same empty result until the Railway seed refreshes the key.
           dataFreshness.recordError('ucdp_events', 'UCDP events unavailable (retaining prior event state)');
+          this.showColdLoadError('ucdp-events');
           return;
         }
         const acledEvents = protestEvents.map(e => ({
@@ -2656,6 +2644,7 @@ export class DataLoaderManager implements AppModule {
         const unhcrResult = await fetchUnhcrPopulation();
         if (!unhcrResult.ok) {
           dataFreshness.recordError('unhcr', 'UNHCR displacement unavailable (retaining prior displacement state)');
+          this.showColdLoadError('displacement');
           return;
         }
         const data = unhcrResult.data;
@@ -2667,7 +2656,7 @@ export class DataLoaderManager implements AppModule {
         if (data.countries.length > 0) dataFreshness.recordUpdate('unhcr', data.countries.length);
       } catch (error) {
         console.error('[Intelligence] UNHCR displacement fetch failed:', error);
-        this.callPanel('displacement', 'showError');
+        this.showColdLoadError('displacement');
         dataFreshness.recordError('unhcr', String(error));
       }
     })());
@@ -2677,6 +2666,7 @@ export class DataLoaderManager implements AppModule {
         const climateResult = await fetchClimateAnomalies();
         if (!climateResult.ok) {
           dataFreshness.recordError('climate', 'Climate anomalies unavailable (retaining prior climate state)');
+          this.showColdLoadError('climate');
           return;
         }
         const anomalies = climateResult.anomalies;
@@ -2688,7 +2678,7 @@ export class DataLoaderManager implements AppModule {
         if (anomalies.length > 0) dataFreshness.recordUpdate('climate', anomalies.length);
       } catch (error) {
         console.error('[Intelligence] Climate anomalies fetch failed:', error);
-        this.callPanel('climate', 'showError');
+        this.showColdLoadError('climate');
         dataFreshness.recordError('climate', String(error));
       }
     })());
@@ -2781,7 +2771,7 @@ export class DataLoaderManager implements AppModule {
     }
 
     this.refreshCiiAndBrief();
-    console.log('[Intelligence] All signals loaded for CII calculation');
+    console.log('[Intelligence] All signals loaded; canonical CII state refreshed');
   }
 
   async loadOutages(): Promise<void> {
