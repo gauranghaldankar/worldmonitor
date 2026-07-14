@@ -85,6 +85,7 @@ import {
   __setForecastLlmTransportForTests,
   __setForecastLlmRunDeadlineForTests,
 } from '../scripts/seed-forecasts.mjs';
+import { OPENROUTER_PROVIDER_ROUTING } from '../scripts/_llm-model-timeouts.mjs';
 import { CONFLICT_COUNT_SOURCE_FEED } from '../scripts/_forecast-resolution.mjs';
 
 const originalForecastEnv = {
@@ -1631,7 +1632,14 @@ describe('forecast llm overrides', () => {
     assert.deepEqual(options.providerOrder, ['openrouter', 'groq']);
     assert.equal(providers[0]?.name, 'openrouter');
     assert.equal(providers[0]?.model, 'deepseek/deepseek-v4-flash');
-    assert.equal(providers[0]?.timeout, 15_000, 'stalled DeepSeek Flash calls must fall through before the 25s clamp');
+    // Was 15_000: a 'stall cutoff' that treated the SYMPTOM of unrouted OpenRouter
+    // requests landing on slow backends. The cause is now fixed at the source (the
+    // openrouter entry carries OPENROUTER_PROVIDER_ROUTING, so calls go to the
+    // fastest non-China-hosted backend). Under that routing Flash completes at p90
+    // 22.4s, so a 15s cutoff did not prevent stalls — it GUARANTEED failure, and
+    // every market_implications run wrote a SEED_ERROR. Flash now gets a completion
+    // deadline that covers its measured distribution.
+    assert.equal(providers[0]?.timeout, 40_000, 'Flash gets its measured completion deadline under pinned routing');
     assert.equal(providers[1]?.name, 'groq');
     assert.equal(providers[1]?.model, 'llama-3.3-70b-versatile');
     assert.equal(providers[1]?.timeout, 20_000, 'the fallback keeps its provider-specific window');
@@ -1655,7 +1663,11 @@ describe('forecast llm overrides', () => {
     assert.equal(providers[1]?.name, 'openrouter');
     assert.equal(providers[1]?.model, 'google/gemini-2.5-flash');
     assert.equal(providers[1]?.timeout, 25_000, 'the DeepSeek stall cutoff must not change the pinned Gemini fallback');
-    assert.equal(providers[1]?.extraBody, undefined, 'pinned openrouter entry must keep the legacy request body (no reasoning field)');
+    assert.deepEqual(
+      providers[1]?.extraBody,
+      { provider: OPENROUTER_PROVIDER_ROUTING },
+      'pinned OpenRouter fallback keeps the mandatory provider policy without adding a reasoning override',
+    );
   });
 
   it('lets ONLY the stage-scoped env override unpin critical_signals', () => {
@@ -1702,7 +1714,7 @@ describe('forecast llm overrides', () => {
 
     assert.equal(providers[0]?.model, 'llama-3.1-8b-instant');
     assert.equal(providers[1]?.model, 'google/gemini-2.5-flash');
-    assert.equal(providers[1]?.extraBody, undefined);
+    assert.deepEqual(providers[1]?.extraBody, { provider: OPENROUTER_PROVIDER_ROUTING });
 
     // The stage-scoped model env DOES reach the pinned fallback slot.
     process.env.FORECAST_LLM_CRITICAL_MODEL_OPENROUTER = 'google/gemini-2.5-pro';
@@ -1731,7 +1743,7 @@ describe('forecast llm overrides', () => {
     assert.deepEqual(scenarioOptions.providerOrder, ['openrouter', 'groq']);
     assert.equal(scenarioProviders[0]?.name, 'openrouter');
     assert.equal(scenarioProviders[0]?.model, 'deepseek/deepseek-v4-flash');
-    assert.equal(scenarioProviders[0]?.timeout, 15_000);
+    assert.equal(scenarioProviders[0]?.timeout, 40_000, 'Flash completion deadline (see above); non-Flash overrides keep 25s');
     assert.equal(scenarioProviders[1]?.model, 'llama-3.3-70b-versatile');
   });
 
