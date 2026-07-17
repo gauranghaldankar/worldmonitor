@@ -668,13 +668,28 @@ export function shouldEnvelopeKey(key) {
 export async function writeExtraKey(key, data, ttl, envelopeMeta) {
   const { url, token } = getRedisCredentials();
   const payload = serializeExtraKeyValue(key, data, envelopeMeta);
-  const resp = await fetch(url, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'User-Agent': CHROME_UA },
-    body: JSON.stringify(['SET', key, payload, 'EX', ttl]),
-    signal: AbortSignal.timeout(10_000),
-  });
-  if (!resp.ok) throw new Error(`Extra key ${key}: write failed (HTTP ${resp.status})`);
+  // Retry transient Redis timeouts / 5xx / network tears so a single Upstash
+  // blip in afterPublish doesn't crash the whole seeder run. Permanent 4xx
+  // (auth, payload-too-large) fail fast; 429 honors Retry-After. Mirrors the
+  // redisCommand / atomicPublish contract (seed-gdelt-intel PUBLISH_TIMEOUT fix).
+  await withRetry(async () => {
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'User-Agent': CHROME_UA },
+      body: JSON.stringify(['SET', key, payload, 'EX', ttl]),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!resp.ok) {
+      const err = new Error(`Extra key ${key}: write failed (HTTP ${resp.status})`);
+      if (PERMANENT_4XX_STATUSES.has(resp.status)) {
+        err.nonRetryable = true;
+      } else if (resp.status === 429) {
+        const retryAfterMs = parseRetryAfterMs(getResponseHeader(resp.headers, 'Retry-After'));
+        if (retryAfterMs != null) err.retryAfterMs = retryAfterMs;
+      }
+      throw err;
+    }
+  }, 2, 1000);
   console.log(`  Extra key ${key}: written`);
 }
 
@@ -730,13 +745,28 @@ export async function extendExistingTtl(keys, ttlSeconds = 600) {
     // EXPIRE only refreshes TTL when key already exists (returns 0 on missing keys — no-op).
     // Check each result: keys that returned 0 are missing/expired and cannot be extended.
     const pipeline = keys.map(k => ['EXPIRE', k, ttlSeconds]);
-    const resp = await fetch(`${url}/pipeline`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(pipeline),
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!resp.ok) return false;
+    // Retry the pipeline call on transient Redis failures. A successful response
+    // with some EXPIRE no-ops is a real missing-key condition, NOT a transient
+    // error, so we only retry HTTP/network failures and return false for no-ops.
+    const resp = await withRetry(async () => {
+      const r = await fetch(`${url}/pipeline`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(pipeline),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!r.ok) {
+        const err = new Error(`TTL extension pipeline failed (HTTP ${r.status})`);
+        if (PERMANENT_4XX_STATUSES.has(r.status)) {
+          err.nonRetryable = true;
+        } else if (r.status === 429) {
+          const retryAfterMs = parseRetryAfterMs(getResponseHeader(r.headers, 'Retry-After'));
+          if (retryAfterMs != null) err.retryAfterMs = retryAfterMs;
+        }
+        throw err;
+      }
+      return r;
+    }, 2, 1000);
     const results = await resp.json();
     const extended = results.filter(r => r?.result === 1).length;
     const missing = results.filter(r => r?.result === 0).length;
