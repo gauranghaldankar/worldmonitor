@@ -41,6 +41,17 @@ const THIRD_PARTY_FETCH_HOST_ALLOWLIST = new Set([
   // above. NOT `api.worldmonitor.app` (stays off so real API regressions
   // surface). WORLDMONITOR-RP.
   'data.debugbear.com',
+  // Self-hosted Umami analytics collector (`src/services/analytics.ts` loads
+  // `abacus.worldmonitor.app/script.js`, whose tracker POSTs events to
+  // `/api/send`). Same disposition as the DebugBear beacon above: a dropped
+  // analytics beacon is invisible to the user and unactionable — typically an
+  // ad-blocker or a fetch-wrapping extension killing the POST. It reaches
+  // Sentry despite the extension gate because the leaked rejection carries our
+  // Vite `window.fetch` trampolines, which make hasFirstParty true. Serves no
+  // product data, so an abacus outage belongs to uptime monitoring, not a
+  // per-user Sentry error. NOT `api.worldmonitor.app` (stays off so real API
+  // regressions surface). WORLDMONITOR-WH/WJ.
+  'abacus.worldmonitor.app',
 ]);
 
 function buildSentryInitOptions(): Parameters<SentryNs['init']>[0] {
@@ -309,6 +320,7 @@ function buildSentryInitOptions(): Parameters<SentryNs['init']>[0] {
       /Response cannot have a body with the given status/, // Safari: Response constructor with 204/304 + body
       /ClerkJS: Network error/, // Clerk SDK transient network failures on user devices
       /^ClerkJS: Response: needs_(?:first|second)_factor\b/, // Clerk SDK auth-flow branch not yet supported; SDK-internal limitation, not our code — WORLDMONITOR-Q1. Narrow to the observed `needs_*_factor` family so future actionable `ClerkJS: Response: <something>` errors (e.g. misconfigured redirect URI) still surface.
+      /\[clerk\] failed to load/, // Clerk SDK failed to load its own UI chunk from clerk.worldmonitor.app — SDK-internal load failure, not our code (WORLDMONITOR-??: Yandex Browser 26.4).
       /doesn't provide an export named/, // stale cached chunk after deploy references removed export
       /Possible side-effect in debug-evaluate/, // Chrome DevTools internal EvalError
       /ConvexError: CONFLICT/, // Expected OCC rejection on concurrent preference saves
@@ -533,7 +545,7 @@ function buildSentryInitOptions(): Parameters<SentryNs['init']>[0] {
       // `injected/hook.js` wraps `window.fetch` and the leaked rejection frame
       // surfaces as `Object.apply`, not `window.fetch`.
       if (/^(?:TypeError: )?Failed to fetch$/.test(msg)
-          && frames.some(f => /^(?:chrome|moz|safari(?:-web)?)-extension:\/\//.test(f.filename ?? '') && /^(?:(?:window|Object)\.)?(?:fetch|apply)$/i.test(f.function ?? ''))) {
+          && frames.some(f => /^(?:chrome|moz|safari(?:-web)?)-extension:\/\//.test(f.filename ?? '') && /^(?:(?:.*\.)?window\.|(?:window|Object)\.)?(?:fetch|apply)$/i.test(f.function ?? ''))) {
         return null;
       }
       // Bare `Failed to fetch` surfacing through the DebugBear RUM collector's
@@ -554,12 +566,18 @@ function buildSentryInitOptions(): Parameters<SentryNs['init']>[0] {
       // extension-wrapper gate above; collector identity comes from
       // DEBUGBEAR_RUM_SCRIPT_SRC via the shared predicate.
       // WORLDMONITOR-VC (93ev/69u, 2026-07-04+).
+      // The optional `\w{1,3}.` receiver prefix is WORLDMONITOR-VQ: a later Vite
+      // build emits the same trampoline as `Rt.window.fetch` rather than a bare
+      // `window.fetch`, and the anchored match rejected it, so the identical
+      // wrapper class re-surfaced as a new issue. The prefix is bounded to a
+      // minified identifier (≤3 chars) so a real named receiver — e.g.
+      // `apiClient.fetch` — is still read as a genuine caller and surfaces.
       if (/^(?:TypeError: )?Failed to fetch$/.test(msg)
           && frames.some(f => isDebugBearRumScriptFrame(f.filename ?? ''))
           && nonInfraFrames.every(f =>
             isDebugBearRumScriptFrame(f.filename ?? '')
             || (/\/assets\/(?:panel-storage|widget-store)-[A-Za-z0-9_-]+\.js/.test(f.filename ?? '')
-              && /^(?:window\.)?fetch$/.test(f.function ?? '')))) {
+              && /^(?:\w{1,3}\.)?(?:window\.)?fetch$/.test(f.function ?? '')))) {
         return null;
       }
       // Suppress Sentry SDK DOM breadcrumb null-access on document.activeElement/contains.
@@ -741,6 +759,14 @@ function buildSentryInitOptions(): Parameters<SentryNs['init']>[0] {
           // mirrors the EOF gate above: some engines embed the type in the
           // `value` field (WORLDMONITOR-TY).
           || /^(?:SyntaxError: )?Unexpected token '<'/.test(msg)
+          // Bare `Unexpected token '<keyword>'` with zero captured frames on ancient
+          // Android WebView (Chrome 98) — injected bridge/extension script or a
+          // browser-internal parse failure, not our already-parsed bundle. A genuine
+          // first-party SyntaxError carries a source-mapped .ts frame or an owned
+          // hashed-chunk URL in the message (handled above). The `hasAnyStack`-gated
+          // token gate below misses this zero-frame variant (WORLDMONITOR-??:
+          // Unexpected token 'else' / 'for', 2026-07-18).
+          || /^(?:SyntaxError: )?Unexpected token '(?:else|for)'$/.test(msg)
           // Firefox's wording for a failed `fetch()` — the engine-emitted
           // equivalent of Chrome's bare `Failed to fetch` (above) and Safari's
           // `Load failed`. Surfaces via `onunhandledrejection` with zero captured

@@ -35,8 +35,8 @@ OAuth endpoints follow [RFC 6749 §5.2](https://datatracker.ietf.org/doc/html/rf
 | `403` | Authenticated but not entitled (usually `pro_required`) | No — upgrade |
 | `404` | Resource / tool / brief / entity not found | No |
 | `405` | Method not allowed | No |
-| `409` | `Idempotency-Key` request still in progress, or another conflict such as duplicate webhook registration. | Yes for keyed in-flight requests - honor `Retry-After: 2`; otherwise no |
-| `422` | `Idempotency-Key` reused with a different request body. | No - resend the original body or use a new key |
+| `409` | `Idempotency-Key` request still in progress, or another conflict such as duplicate webhook registration. | Yes for keyed in-flight requests — honor `Retry-After: 2`; otherwise no |
+| `422` | `Idempotency-Key` reused with a different request body. | No — resend the original body or use a new key |
 | `413` | Payload too large | No |
 | `429` | Rate limited | Yes — honor `Retry-After` |
 | `500` | Server bug | Yes — with backoff, then report |

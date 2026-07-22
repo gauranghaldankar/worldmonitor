@@ -328,6 +328,17 @@ img { max-width: 100%; height: auto; border-radius: var(--radius); }
   font-family: var(--font-mono);
 }
 
+.post-card.pinned {
+  border-color: var(--wm-green);
+}
+
+.post-card .tag .pin {
+  border: 1px solid var(--wm-green);
+  border-radius: 3px;
+  padding: 0.1rem 0.4rem;
+  margin-right: 0.5rem;
+}
+
 .post-card h2 {
   font-family: var(--font-display);
   font-size: 1.125rem;

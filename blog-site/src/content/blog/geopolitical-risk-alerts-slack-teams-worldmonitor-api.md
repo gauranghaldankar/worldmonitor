@@ -4,7 +4,7 @@ description: "Turn WorldMonitor API and MCP data into practical alerts for count
 metaTitle: "Geopolitical Risk Alerts for Slack | WorldMonitor API"
 keywords: "geopolitical risk alerts, OSINT alert pipeline, Slack risk alerts, intelligence API alerts, WorldMonitor API alerts"
 audience: "Developers, security operations teams, risk analysts, platform engineers"
-heroImage: "/blog/og/geopolitical-risk-alerts-slack-teams-worldmonitor-api.png"
+heroImage: "/blog/images/blog/geopolitical-risk-alerts-slack-teams-worldmonitor-api.jpg"
 pubDate: "2026-06-10"
 modifiedDate: "2026-06-13"
 ---

@@ -4,7 +4,7 @@ description: "A practical blueprint for monitoring chokepoints, port activity, e
 metaTitle: "Supply Chain Early Warning Dashboard | WorldMonitor API"
 keywords: "supply chain early warning dashboard, supply chain risk API, chokepoint monitoring API, geopolitical supply chain risk, port disruption monitoring"
 audience: "Supply chain teams, logistics analysts, procurement leaders, data engineers"
-heroImage: "/blog/og/supply-chain-early-warning-dashboard-worldmonitor-api.png"
+heroImage: "/blog/images/blog/supply-chain-early-warning-dashboard-worldmonitor-api.jpg"
 pubDate: "2026-06-10"
 modifiedDate: "2026-06-13"
 ---

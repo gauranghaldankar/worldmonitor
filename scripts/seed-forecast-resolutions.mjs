@@ -17,9 +17,10 @@
 import { CHROME_UA, loadEnvFile, runSeed } from './_seed-utils.mjs';
 import { unwrapEnvelope } from './_seed-envelope-source.mjs';
 import { resolveR2StorageConfig, putR2JsonObject } from './_r2-storage.mjs';
-import { parseMetricKey, resolveHardSpec, extractMetricValue } from './_forecast-resolution-eval.mjs';
+import { parseMetricKey, resolveHardSpec, extractMetricValue, extractMetricObservation } from './_forecast-resolution-eval.mjs';
 import { CONFLICT_COUNT_FEED_AVAILABLE, UNREST_COUNT_FEED_AVAILABLE, CONFLICT_COUNT_SOURCE_FEED, UNREST_COUNT_SOURCE_FEED } from './_forecast-resolution.mjs';
 import { computeScorecard, DEFAULT_ROLLING_WINDOW_DAYS } from './_forecast-scorecard.mjs';
+import { BETS_HISTORY_KEY } from './_forecast-bets-keys.mjs';
 import { callForecastLLM } from './seed-forecasts.mjs';
 import { readStoryTracksChunked, STORY_TRACK_HGETALL_BATCH } from './lib/story-track-batch-reader.mjs';
 
@@ -878,9 +879,15 @@ export function samplePendingEntries(ledger, feedsByKey, nowMs) {
       entry.samples = appendSample(entry.samples, { ts: nowMs, error: `missing_feed:${entry.spec.sourceFeed || parsed.feedKey}` });
       continue;
     }
-    const value = extractMetricValue(parsed, feedData);
+    const { value, asOf } = extractMetricObservation(parsed, feedData);
+    // Stamp the sample with the source observation time (asOf) when the feed
+    // provides one, NOT the cycle time — otherwise a stale kept-warm reading
+    // gets a post-deadline ts and is later preferred over the fresh quote,
+    // defeating the settlement gate (#5243 P1). Feeds with no per-record
+    // timestamp (riskScore/hexCount/yesPrice) keep the cycle time.
+    const sampleTs = Number.isFinite(asOf) ? asOf : nowMs;
     entry.samples = Number.isFinite(value)
-      ? appendSample(entry.samples, { ts: nowMs, value })
+      ? appendSample(entry.samples, { ts: sampleTs, value })
       : appendSample(entry.samples, { ts: nowMs, error: 'metric_not_found' });
   }
 }
@@ -1043,6 +1050,65 @@ async function readForecastHistory(limit = 200) {
     .filter(Boolean);
 }
 
+// Shadow bet-engine stream (Phase 1 / #5233). Bets carry #4976 specs and
+// generationOrigin 'bet_engine'; ingested alongside forecast history so they
+// resolve + score into the scorecard's byGenerationOrigin='bet_engine' slice.
+// Users never see them (not in forecast:predictions:v2). The key is shared with
+// the writer (seed-forecast-bets) via _forecast-bets-keys.mjs so it can't drift.
+export { BETS_HISTORY_KEY };
+
+async function readBetsHistory(limit = 200) {
+  const url = process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+  if (!url || !token) throw new Error('Missing UPSTASH_REDIS_REST_URL or UPSTASH_REDIS_REST_TOKEN');
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'User-Agent': CHROME_UA },
+    body: JSON.stringify(['LRANGE', BETS_HISTORY_KEY, 0, Math.max(0, limit - 1)]),
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!resp.ok) throw new Error(`Redis LRANGE ${BETS_HISTORY_KEY} failed: HTTP ${resp.status}`);
+  const payload = await resp.json();
+  return (Array.isArray(payload.result) ? payload.result : [])
+    .map((row) => { try { return JSON.parse(row); } catch { return null; } })
+    .filter(Boolean);
+}
+
+// Feed loaders shape a raw feed snapshot into the record collection the eval's
+// metricKey path expression reads. energy:eia-petroleum:v1 stores a flat
+// {wti,brent,production,inventory} each {current,...}; bets read it as
+// `value(metric==<name>)`, so expose one record per metric carrying `value`.
+export function shapeResolutionFeed(key, data) {
+  if (key === 'energy:eia-petroleum:v1') {
+    const d = data?.data ?? data;
+    if (!d || typeof d !== 'object') return data;
+    const records = [];
+    for (const metric of ['wti', 'brent', 'production', 'inventory']) {
+      const m = d[metric];
+      const value = Number(m?.current);
+      if (Number.isFinite(value)) records.push({ metric, value, unit: m?.unit, asOf: m?.date });
+    }
+    return records;
+  }
+  if (key === 'market:commodities-bootstrap:v1') {
+    // Enveloped as {_seed, data:{quotes:[...]}}. The eval's iterateRecords only
+    // descends into ARRAY children, so the doubly-nested quotes array is
+    // invisible as-is — expose it directly so `price(symbol==<SYM>)` resolves.
+    // (Also unblocks the pre-existing market commodity-price forecast path.)
+    // Quotes carry no per-symbol timestamp; stamp each with the envelope's
+    // `_seed.fetchedAt` as `asOf` so the settlement gate can refuse to resolve a
+    // stale kept-warm quote (extendExistingTtl preserves the old fetchedAt) as
+    // if it were the deadline-time price.
+    const fetchedAt = Number(data?._seed?.fetchedAt);
+    const d = data?.data ?? data;
+    if (Array.isArray(d?.quotes)) {
+      return d.quotes.map((q) => (q && typeof q === 'object' && Number.isFinite(fetchedAt) ? { ...q, asOf: fetchedAt } : q));
+    }
+    return d;
+  }
+  return data;
+}
+
 async function readResolutionFeeds(ledger) {
   const keys = [...new Set(Object.values(ledger)
     .filter((entry) => entry.status === 'pending')
@@ -1053,7 +1119,8 @@ async function readResolutionFeeds(ledger) {
   for (let index = 0; index < results.length; index += 1) {
     const result = results[index];
     if (result.status === 'fulfilled') {
-      pairs.push(result.value);
+      const [key, data] = result.value;
+      pairs.push([key, shapeResolutionFeed(key, data)]);
     } else {
       console.warn(`  [forecast-resolutions] feed ${keys[index]} unavailable: ${result.reason?.message || result.reason}`);
     }
@@ -1233,11 +1300,15 @@ function buildLiveJudgedOptions(nowMs = Date.now()) {
 
 async function buildLedgerForRun() {
   const nowMs = Date.now();
-  const [existingLedger, history] = await Promise.all([
+  const [existingLedger, history, betsHistory] = await Promise.all([
     readRedisJson(RESOLUTIONS_KEY),
     readForecastHistory(200),
+    readBetsHistory(200).catch((err) => {
+      console.warn(`  [forecast-resolutions] bets shadow stream unavailable: ${err?.message || err}`);
+      return [];
+    }),
   ]);
-  const preLedger = ingestHistory(existingLedger || {}, history, nowMs);
+  const preLedger = ingestHistory(existingLedger || {}, [...history, ...betsHistory], nowMs);
   const feeds = await readResolutionFeeds(preLedger);
   const judgedOptions = buildLiveJudgedOptions(nowMs);
   const judgedArchive = await readJudgedNewsArchiveForLedger(preLedger, nowMs, judgedOptions);
@@ -1254,11 +1325,12 @@ async function buildLedgerForRun() {
 
 async function dryRun() {
   const nowMs = Date.now();
-  const [existingLedger, history] = await Promise.all([
+  const [existingLedger, history, betsHistory] = await Promise.all([
     readRedisJson(RESOLUTIONS_KEY).catch(() => null),
     readForecastHistory(200),
+    readBetsHistory(200).catch(() => []),
   ]);
-  const preLedger = ingestHistory(existingLedger || {}, history, nowMs);
+  const preLedger = ingestHistory(existingLedger || {}, [...history, ...betsHistory], nowMs);
   const feeds = await readResolutionFeeds(preLedger);
   const judgedOptions = buildLiveJudgedOptions(nowMs);
   const judgedArchive = await readJudgedNewsArchiveForLedger(preLedger, nowMs, judgedOptions);

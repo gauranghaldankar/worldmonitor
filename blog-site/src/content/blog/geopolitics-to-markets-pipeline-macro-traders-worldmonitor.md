@@ -4,7 +4,7 @@ description: "Translate geopolitical events into market watchlists with transmis
 metaTitle: "Geopolitics-to-Markets Pipeline | WorldMonitor"
 keywords: "geopolitics to markets, macro trading workflow, geopolitical market risk, market implications, macro radar, commodity risk"
 audience: "Macro traders, portfolio managers, market strategists, risk analysts"
-heroImage: "/blog/og/geopolitics-to-markets-pipeline-macro-traders-worldmonitor.png"
+heroImage: "/blog/images/blog/geopolitics-to-markets-pipeline-macro-traders-worldmonitor.jpg"
 pubDate: "2026-06-13"
 ---
 

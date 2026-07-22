@@ -4,7 +4,7 @@ description: "A practical guide to the WorldMonitor Country Resilience Index: 19
 metaTitle: "Country Resilience Index Methodology | WorldMonitor"
 keywords: "country resilience index, resilience score methodology, country risk methodology, national resilience indicators, shock absorption score"
 audience: "Risk analysts, policy teams, country researchers, resilience modelers"
-heroImage: "/blog/og/country-resilience-index-methodology-explained.png"
+heroImage: "/blog/images/blog/country-resilience-index-methodology-explained.jpg"
 pubDate: "2026-06-13"
 ---
 

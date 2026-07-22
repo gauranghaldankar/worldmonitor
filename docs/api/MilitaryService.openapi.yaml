@@ -994,7 +994,7 @@ paths:
             tags:
                 - MilitaryService
             summary: ListDefensePatents
-            description: ListDefensePatents retrieves recent defense/dual-use patent filings from USPTO PatentsView.
+            description: ListDefensePatents retrieves recent defense/dual-use patent filings from the USPTO Open Data Portal.
             operationId: ListDefensePatents
             parameters:
                 - name: cpc_code
@@ -1035,7 +1035,7 @@ paths:
                             example:
                                 "fetchedAt": "2026-01-15T12:00:00Z"
                                 "patents":
-                                    - "abstract": "example"
+                                    - "abstract": ""
                                       "assignee": "example"
                                       "cpcCode": "example"
                                       "cpcDesc": "example"
@@ -2100,7 +2100,9 @@ components:
                     description: CPC class description.
                 abstract:
                     type: string
-                    description: Patent abstract (truncated to 500 chars).
+                    description: |-
+                        Compatibility field retained for existing clients. Always empty because
+                         USPTO Open Data Portal Patent File Wrapper records do not include abstracts.
                 url:
                     type: string
                     description: USPTO patent URL.

@@ -29,6 +29,9 @@ import type {
   CountryDeepDiveSignalItem,
   CountryDeepDiveMilitarySummary,
   CountryDeepDiveEconomicIndicator,
+  ChinaCountrySummaryData,
+  ChinaCountrySummaryGroup,
+  ChinaCountrySummaryGroupId,
   CountryFactsData,
   CountryEnergyProfileData,
   CountryPortActivityData,
@@ -126,6 +129,7 @@ export class CountryDeepDivePanel implements CountryBriefPanel {
   private militaryBody: HTMLElement | null = null;
   private infrastructureBody: HTMLElement | null = null;
   private economicBody: HTMLElement | null = null;
+  private chinaSummaryBody: HTMLElement | null = null;
   private housingBody: HTMLElement | null = null;
   private marketsBody: HTMLElement | null = null;
   private briefBody: HTMLElement | null = null;
@@ -555,6 +559,11 @@ export class CountryDeepDivePanel implements CountryBriefPanel {
   public updateEconomicIndicators(indicators: CountryDeepDiveEconomicIndicator[]): void {
     this.economicIndicators = indicators;
     this.renderEconomicIndicators();
+  }
+
+  public updateChinaCountrySummary(data: ChinaCountrySummaryData): void {
+    if (this.currentCode?.toUpperCase() !== 'CN' || !this.chinaSummaryBody) return;
+    this.renderChinaCountrySummary(data.groups);
   }
 
   public updateCountryFacts(data: CountryFactsData): void {
@@ -2577,6 +2586,24 @@ export class CountryDeepDivePanel implements CountryBriefPanel {
     this.militaryBody = militaryBody;
     this.infrastructureBody = infraBody;
     this.economicBody = economicBody;
+    let chinaSummaryCard: HTMLElement | null = null;
+    // Drop any body left over from a previous China render so a non-China
+    // country never keeps a detached summary body reachable.
+    this.chinaSummaryBody = null;
+    if (code.toUpperCase() === 'CN') {
+      const [card, body] = this.sectionCard(t('countryBrief.china.title'), t('countryBrief.china.description'));
+      card.classList.add('cdp-china-summary');
+      card.setAttribute('aria-label', t('countryBrief.china.title'));
+      this.chinaSummaryBody = body;
+      this.renderChinaCountrySummary([
+        'macro-policy',
+        'market-credit',
+        'trade-supply',
+        'energy',
+        'availability',
+      ].map((id) => ({ id: id as ChinaCountrySummaryGroupId, state: 'loading', signals: [] })));
+      chinaSummaryCard = card;
+    }
     this.housingBody = housingBody;
     this.marketsBody = marketsBody;
     this.briefBody = briefBody;
@@ -2590,7 +2617,7 @@ export class CountryDeepDivePanel implements CountryBriefPanel {
     marketsBody.append(this.makeLoading(t('countryBrief.loadingMarkets')));
     briefBody.append(this.makeLoading(t('countryBrief.generatingBrief')));
 
-    bodyGrid.append(briefCard, factsExpanded, energyCard, maritimeCard, tradeCard, costShockCalcCard, productImportsCard, debtCard, sanctionsCard, comtradeCard, tariffCard, signalsCard, timelineCard, newsCard, militaryCard, infraCard, economicCard, housingCard, marketsCard);
+    bodyGrid.append(briefCard, ...(chinaSummaryCard ? [chinaSummaryCard] : []), factsExpanded, energyCard, maritimeCard, tradeCard, costShockCalcCard, productImportsCard, debtCard, sanctionsCard, comtradeCard, tariffCard, signalsCard, timelineCard, newsCard, militaryCard, infraCard, economicCard, housingCard, marketsCard);
     shell.append(header, summaryGrid, bodyGrid);
     this.content.append(shell);
   }
@@ -2699,6 +2726,7 @@ export class CountryDeepDivePanel implements CountryBriefPanel {
     this.energyBody = null;
     this.maritimeBody = null;
     this.tradeExposureBody = null;
+    this.chinaSummaryBody = null;
     this.productImportsBody = null;
     this.debtBody = null;
     this.housingBody = null;
@@ -2872,6 +2900,89 @@ export class CountryDeepDivePanel implements CountryBriefPanel {
       }
       this.economicBody.append(row);
     }
+  }
+
+  private renderChinaCountrySummary(groups: ChinaCountrySummaryGroup[]): void {
+    if (!this.chinaSummaryBody) return;
+
+    // The group <section>s are aria-live regions. They must stay in the DOM
+    // across updates — screen readers only announce mutations *inside* an
+    // existing live region, so tearing the sections down and rebuilding them
+    // (the old replaceChildren-the-card approach) meant state transitions
+    // like loading→stale were never announced.
+    let grid = this.chinaSummaryBody.querySelector<HTMLElement>('.cdp-china-summary-grid');
+    if (!grid) {
+      this.chinaSummaryBody.replaceChildren();
+      grid = this.el('div', 'cdp-china-summary-grid');
+      this.chinaSummaryBody.append(grid);
+    }
+
+    for (const group of groups) {
+      let section = grid.querySelector<HTMLElement>(`[data-group-id="${group.id}"]`);
+      if (!section) {
+        section = this.el('section', 'cdp-china-summary-group');
+        section.setAttribute('data-group-id', group.id);
+        section.setAttribute('role', 'status');
+        section.setAttribute('aria-live', 'polite');
+        grid.append(section);
+      }
+
+      // Manager updates push the full five-group snapshot each time any one
+      // group resolves; skip untouched groups so unchanged content is not
+      // re-announced on every sibling resolution.
+      const revision = JSON.stringify(group);
+      if (section.dataset.revision === revision) continue;
+      section.dataset.revision = revision;
+
+      const groupLabel = this.chinaSummaryGroupLabel(group.id);
+      const stateLabel = t(`countryBrief.china.status.${group.state}`);
+      section.className = `cdp-china-summary-group cdp-china-summary-group--${group.state}`;
+      section.setAttribute('aria-label', `${groupLabel}: ${stateLabel}`);
+
+      const heading = this.el('div', 'cdp-china-summary-heading');
+      heading.append(
+        this.el('h4', 'cdp-china-summary-title', groupLabel),
+        this.el('span', 'cdp-china-summary-state', stateLabel),
+      );
+      const children: HTMLElement[] = [heading];
+
+      if (group.signals.length === 0) {
+        children.push(this.el(
+          'div',
+          'cdp-china-summary-empty',
+          group.unavailableReason || t(`countryBrief.china.status.${group.state}`),
+        ));
+      } else {
+        for (const signal of group.signals) {
+          const item = this.el('div', 'cdp-china-summary-signal');
+          if (signal.stale) item.dataset.stale = 'true';
+          item.append(
+            this.el('div', 'cdp-china-summary-signal-label', signal.label),
+            this.el('div', 'cdp-china-summary-signal-value', signal.value),
+          );
+          if (signal.observedAt) {
+            item.append(this.el('div', 'cdp-china-summary-attribution', `${t('countryBrief.china.observed')} ${signal.observedAt}`));
+          }
+          item.append(this.el('div', 'cdp-china-summary-attribution', `${t('countryBrief.china.source')} ${signal.source}`));
+          children.push(item);
+        }
+        if (group.unavailableReason) {
+          children.push(this.el('div', 'cdp-china-summary-note', group.unavailableReason));
+        }
+      }
+      section.replaceChildren(...children);
+    }
+  }
+
+  private chinaSummaryGroupLabel(id: ChinaCountrySummaryGroupId): string {
+    const keys: Record<ChinaCountrySummaryGroupId, string> = {
+      'macro-policy': 'macroPolicy',
+      'market-credit': 'marketCredit',
+      'trade-supply': 'tradeSupply',
+      energy: 'energy',
+      availability: 'availability',
+    };
+    return t(`countryBrief.china.${keys[id]}`);
   }
 
   private highlightInfrastructure(type: AssetType): void {

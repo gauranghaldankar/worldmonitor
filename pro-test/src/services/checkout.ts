@@ -26,6 +26,10 @@ import {
   buildCheckoutReturnUrl,
 } from './checkout-intent-url';
 import { createEntitlementWatchdog, type EntitlementWatchdog } from './entitlement-watchdog';
+import {
+  createDefaultCheckoutTransportDeps,
+  postCreateCheckout,
+} from './checkout-transport';
 import { DASHBOARD_CHECKOUT_SUCCESS_URL, DASHBOARD_CHECKOUT_RETURN_URL } from '../routes';
 import fallbackTiers from '../generated/tiers.json';
 
@@ -503,13 +507,13 @@ async function doCheckout(
       return false;
     }
 
-    const resp = await fetch(`${API_BASE}/create-checkout`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({
+    // Transient CF/origin 502s on this POST are retried once with an
+    // Idempotency-Key (server dedupes replays — api/_idempotency.ts).
+    // WORLDMONITOR-Q4: without this, every transient was a lost checkout.
+    const resp = await postCreateCheckout(createDefaultCheckoutTransportDeps(), {
+      url: `${API_BASE}/create-checkout`,
+      token,
+      payload: {
         productId,
         // #4449 review: use the GUARDED return contract, not the bare
         // `?wm_checkout=success` marker. With hosted redirect now the primary
@@ -523,8 +527,7 @@ async function doCheckout(
         // #4438: only set when the user confirmed "start a new checkout anyway"
         // from the pending-payment dialog. Skips the backend pending guard.
         ...(options.bypassPendingGuard ? { bypassPendingGuard: true } : {}),
-      }),
-      signal: AbortSignal.timeout(15_000),
+      },
     });
 
     if (!resp.ok) {

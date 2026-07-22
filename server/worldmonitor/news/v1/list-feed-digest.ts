@@ -183,10 +183,11 @@ interface ParsedItem {
   // absent, too short, or indistinguishable from the headline. Grounding input
   // for brief / whyMatters / SummarizeArticle LLMs.
   description: string;
-  // Opinion / analysis classification (classifyOpinion over title + link +
-  // description). Persisted on the story:track:v1 row as `isOpinion` so the
-  // brief's read path (buildDigest) can exclude op-ed/column content — the
-  // brief is event-driven intelligence, a column is not an event. See
+  // Non-event brief classification (classifyOpinion over title + link +
+  // description). Persisted on the legacy `isOpinion` story:track:v1 field
+  // so buildDigest can exclude op-ed/column and historical-explainer content
+  // — the brief is event-driven intelligence, not an editorial or look-back
+  // feed. See
   // docs/plans/2026-05-14-001-…-plan.md (F3). story:track rows feed more
   // than the brief, so this STAMPS rather than drops — only buildDigest
   // filters on it.
@@ -424,7 +425,14 @@ async function fetchAndParseRss(
   // shape changes.)
   // v5→v6 (#4920 review): ParseResult gained droppedFeedCap; warm v5 rows
   // lack it and would undercount the coverage ledger for their whole TTL.
-  const cacheKey = `rss:feed:v6:${variant}:${feed.url}`;
+  // v6→v7: ParsedItems now stamp historical explainers using their persisted
+  // publishedAt. Digest reads deliberately trust explicit isOpinion stamps,
+  // so warm v6 rows could retain an earlier "0" verdict for one cache TTL.
+  // Force a cold parse to stamp the stable ingest-time verdict immediately.
+  // v7→v8: extend the same exclusion policy to duration-led anniversary
+  // explainers ("10 years on from …"). Warm v7 rows already carry an
+  // authoritative isOpinion="0", so force another cold parse on rollout.
+  const cacheKey = `rss:feed:v8:${variant}:${feed.url}`;
 
   try {
     // Read cache unconditionally — the v5 prefix guarantees pre-fix
@@ -603,7 +611,7 @@ function parseRssXml(xml: string, feed: ServerFeed, variant: string): ParseResul
       entityCorroborationCount: 0,
       lang: feed.lang ?? 'en',
       description,
-      isOpinion: classifyOpinion({ title, link, description }),
+      isOpinion: classifyOpinion({ title, link, description, publishedAt }),
       isFeelGood: classifyFeelGood({ title, link, description }),
       isEphemeralLiveCoverage: classifyEphemeralLiveCoverage({ title, link, description }),
       tickers: extractTickers(`${title} ${description}`, TICKER_DICTIONARY),
@@ -740,15 +748,30 @@ function extractTag(xml: string, tag: string): string {
   return match ? decodeXmlEntities(match[1]!.trim()) : '';
 }
 
+/**
+ * `String.fromCodePoint` throws `RangeError` on anything outside the Unicode
+ * range, which would turn one malformed numeric reference into a failed feed
+ * parse. Drop those instead. `fromCharCode` is not usable here: it truncates to
+ * 16 bits, so `&#128512;` decoded to U+F600 (a private-use glyph) rather than 😀.
+ */
+function decodeNumericReference(codePoint: number): string {
+  return Number.isInteger(codePoint) && codePoint >= 0 && codePoint <= 0x10ffff
+    ? String.fromCodePoint(codePoint)
+    : '';
+}
+
 function decodeXmlEntities(s: string): string {
   return s
-    .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
     .replace(/&apos;/g, "'")
-    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
-    .replace(/&#x([0-9a-fA-F]+);/g, (_, n) => String.fromCharCode(parseInt(n, 16)));
+    .replace(/&#(\d+);/g, (_, n) => decodeNumericReference(Number(n)))
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, n) => decodeNumericReference(parseInt(n, 16)))
+    // `&amp;` MUST be decoded last. Decoding it first turns the escaped
+    // ampersand of `&amp;lt;` into a live `&`, which the very next replace then
+    // consumes as `&lt;` — one pass decoding twice.
+    .replace(/&amp;/g, '&');
 }
 
 async function enrichWithAiCache(items: ParsedItem[]): Promise<void> {
@@ -1106,8 +1129,9 @@ function buildStoryTrackHsetFields(
     'entityCorroborationCount', Number.isFinite(item.entityCorroborationCount)
       ? String(item.entityCorroborationCount)
       : '0',
-    // Opinion/analysis flag (classifyOpinion). '1' = op-ed/column,
-    // '0' = hard news. buildDigest's read-path filter excludes '1' rows
+    // Non-event brief flag (classifyOpinion). '1' = op-ed/column or
+    // historical explainer, '0' = hard news. The legacy `isOpinion` field
+    // name remains for cache compatibility; buildDigest excludes '1' rows
     // from the brief pool. Written unconditionally for the same
     // shared-row reason as `description` above: story:track rows are
     // collapsed by normalised-title hash, so a stale '1' from an earlier
@@ -1538,6 +1562,7 @@ async function buildDigest(variant: string, lang: string): Promise<ListFeedDiges
 /** Internal exports for unit tests only — do not import in production code. */
 export const __testing__ = {
   parseRssXml,
+  decodeXmlEntities,
   extractDescription,
   extractRawTagBody,
   extractFirstDateTag,

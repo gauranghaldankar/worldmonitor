@@ -4,7 +4,7 @@ description: "A practical overview of self-hosting WorldMonitor with Docker or P
 metaTitle: "Self-Host WorldMonitor OSINT Dashboard"
 keywords: "self host WorldMonitor, open source OSINT dashboard, Docker OSINT dashboard, geopolitical dashboard self hosted, AGPL intelligence dashboard"
 audience: "Developers, OSINT builders, platform teams, security researchers"
-heroImage: "/blog/og/self-host-worldmonitor-open-source-osint-dashboard.png"
+heroImage: "/blog/images/blog/self-host-worldmonitor-open-source-osint-dashboard.jpg"
 pubDate: "2026-06-13"
 ---
 

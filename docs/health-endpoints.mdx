@@ -75,6 +75,7 @@ Keys are grouped into three tiers that determine alert severity:
 |--------|----------|---------|
 | `OK` | Green | Data present, seed fresh |
 | `OK_CASCADE` | Green | Key empty but a sibling in the cascade group has data (e.g., theater posture fallback chain) |
+| `NOT_CONFIGURED` | Green | An optional source adapter this deployment never supplied a credential for (producer wrote `sourceState: "unavailable"`, e.g. the Global Tenders SAM.gov adapter without `SAM_GOV_API_KEY`). Not a fault and not counted as a problem; flips to `OK` on the first run after the credential is added |
 | `STALE_SEED` | Warn | Data present but `seed-meta` age exceeds `maxStaleMin` |
 | `STALE_CONTENT` | Warn | Seeder is fresh but the upstream content stopped advancing (frozen feed); counted in `summary.staleContent` |
 | `COVERAGE_PARTIAL` | Warn | Record count is below the key's declared `minRecordCount` (e.g. 10/13 chokepoints or 139/174 PortWatch port-activity countries) |
@@ -83,6 +84,23 @@ Keys are grouped into three tiers that determine alert severity:
 | `EMPTY_ON_DEMAND` | Warn | On-demand key has no data yet (expected until first request); counted in `summary.onDemandWarn` |
 | `EMPTY` | Crit | Bootstrap or seeded standalone key has no data |
 | `EMPTY_DATA` | Crit | Key exists but contains zero records (and 0 is not a valid state for it) |
+
+### China Coverage Projection
+
+`chinaCoverage` projects the hourly Railway summary at
+`health:china-coverage:v1`. The evaluator checks each launched China contract
+for both a fresh producer heartbeat and fresh, substantive China content; a
+fresh seed cannot hide stale or missing source content. `CHINA_DEGRADED` is a
+warning projection for partial or stale coverage, while `CHINA_UNAVAILABLE` is
+critical when the summary is invalid or the launched content is unavailable.
+Blocked China contracts remain visible in the audit with their stable reason
+code but are excluded from the strict launched-entry health count.
+
+Operators can obtain the same sanitized, read-only audit with
+`node scripts/audit-china-coverage.mjs --json`; add `--strict` to return a
+nonzero exit code unless every launched entry is healthy. The audit reads only
+the compact Redis contracts and emits status, age, and reason-code summaries—
+never credentials or raw upstream payloads.
 
 ### Cascade Groups
 

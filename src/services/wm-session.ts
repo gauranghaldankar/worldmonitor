@@ -14,10 +14,15 @@
 
 import { getCanonicalApiOrigin, toApiUrl } from './runtime';
 import { PREMIUM_RPC_PATHS } from '@/shared/premium-paths';
+import { isPublicSharedRpcRequest } from '@/shared/public-rpc-cache';
+import { enqueueSentryCall } from '@/bootstrap/sentry-defer';
 
 const STORAGE_KEY = 'wm-session-exp';
 // Refresh well before expiry so a half-loaded page doesn't fail mid-flight.
 const REFRESH_MARGIN_MS = 5 * 60 * 1000;
+// Abort a session mint that stalls. Without this, a hung /api/wm-session response
+// strands every concurrent caller on the shared `inflight` promise forever.
+let fetchNewSessionTimeoutMs = 10_000;
 // Periodic refresh cadence — wake every 30 minutes to renew before the
 // 12-hour token expires. Long-lived tabs (overnight, multi-day) lose the
 // token without this; the original implementation had no auto-refresh.
@@ -27,6 +32,8 @@ const PERIODIC_REFRESH_MS = 30 * 60 * 1000;
 // request + mint + retry loop for every panel refresh.
 const SESSION_DEAD_COOLDOWN_MS = 15 * 60 * 1000;
 export const WM_SESSION_DEGRADED_EVENT = 'wm-session-degraded';
+
+type WmSessionDeadReason = 'mint_failed' | 'retry_401';
 
 interface StoredSession {
   exp: number;
@@ -39,6 +46,7 @@ let sessionGeneration = 0;
 let interceptorInstalled = false;
 let nativeSessionFetch: typeof fetch | null = null;
 let sessionDeadUntil = 0;
+let sentryEnqueue: typeof enqueueSentryCall = enqueueSentryCall;
 
 export function isWmSessionDead(): boolean {
   if (sessionDeadUntil <= Date.now()) {
@@ -48,13 +56,24 @@ export function isWmSessionDead(): boolean {
   return true;
 }
 
-function markWmSessionDead(): void {
+function markWmSessionDead(reason: WmSessionDeadReason): void {
   const alreadyDead = isWmSessionDead();
   sessionDeadUntil = Date.now() + SESSION_DEAD_COOLDOWN_MS;
   cached = null;
   try { sessionStorage.removeItem(STORAGE_KEY); } catch { /* ignore */ }
   if (alreadyDead) return;
   console.warn('[wm-session] refreshed HttpOnly session cookie was still rejected; suppressing anonymous API calls briefly');
+  // One warning per degraded episode — reportServerError (premium-fetch.ts)
+  // deliberately skips the synthetic X-Wm-Session-Degraded 503s, so this is
+  // the only remote signal that anonymous browsing is degraded (#5245).
+  // Guarded: a telemetry throw must never skip the degraded-event dispatch
+  // below, nor turn the interceptor's recovery return into a rejection.
+  try {
+    sentryEnqueue((s) => s.captureMessage(
+      'wm-session dead: anonymous API calls suppressed',
+      { level: 'warning', tags: { kind: 'wm_session_dead', reason } },
+    ));
+  } catch { /* best-effort telemetry */ }
   if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
     window.dispatchEvent(new Event(WM_SESSION_DEGRADED_EVENT));
   }
@@ -96,6 +115,7 @@ async function fetchNewSession(body?: { widgetKey?: string; proKey?: string }): 
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
       body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(fetchNewSessionTimeoutMs),
     });
     if (!resp.ok) return null;
     const data = await resp.json() as { exp?: unknown };
@@ -168,6 +188,20 @@ export function __resetWmSessionForTests(): void {
   sessionGeneration = 0;
   interceptorInstalled = false;
   sessionDeadUntil = 0;
+  sentryEnqueue = enqueueSentryCall;
+  fetchNewSessionTimeoutMs = 10_000;
+}
+
+// Test-only: shrink the mint timeout so adversarial repros for hung fetches
+// don't need to wait the production 10s budget.
+export function __setWmSessionFetchTimeoutForTests(ms: number): void {
+  fetchNewSessionTimeoutMs = ms;
+}
+
+// Test-only: observe the once-per-episode dead-session Sentry capture without
+// loading the SDK. Reset back to the real enqueue by __resetWmSessionForTests.
+export function __setWmSessionSentryEnqueueForTests(fn: typeof enqueueSentryCall): void {
+  sentryEnqueue = fn;
 }
 
 // Install a one-shot fetch wrapper that includes HttpOnly session cookies on
@@ -211,6 +245,37 @@ export function isApiCallTarget(url: string, apiOrigin: string): boolean {
   return parsed.origin === apiOrigin && parsed.pathname.startsWith('/api/');
 }
 
+function isCredentiallessPublicDataRequest(
+  input: RequestInfo | URL,
+  init: RequestInit | undefined,
+  url: string,
+): boolean {
+  const credentials = init?.credentials ?? (input instanceof Request ? input.credentials : undefined);
+  if (credentials !== 'omit') return false;
+
+  let parsed: URL;
+  try {
+    parsed = new URL(url, typeof location === 'undefined' ? 'http://localhost' : location.href);
+  } catch {
+    return false;
+  }
+
+  const pathname = parsed.pathname.length > 1 ? parsed.pathname.replace(/\/+$/, '') : parsed.pathname;
+  const method = init?.method ?? (input instanceof Request ? input.method : 'GET');
+  if (isPublicSharedRpcRequest(parsed, method)) return true;
+  if (pathname !== '/api/bootstrap' || method.toUpperCase() !== 'GET') return false;
+
+  const params = Array.from(parsed.searchParams.keys());
+  if (params.some((key) => key !== 'tier' && key !== 'public')) return false;
+
+  const tiers = parsed.searchParams.getAll('tier');
+  const publicFlags = parsed.searchParams.getAll('public');
+  return tiers.length === 1
+    && (tiers[0] === 'fast' || tiers[0] === 'slow')
+    && publicFlags.length === 1
+    && publicFlags[0] === '1';
+}
+
 // If a caller already set Authorization / X-WorldMonitor-Key / X-Api-Key, we
 // don't override — Clerk Bearer JWT and explicit user keys still take
 // precedence over the anonymous session token.
@@ -248,6 +313,14 @@ export function installWmSessionFetchInterceptor(): void {
     })();
 
     if (!isApiCallTarget(url, apiOrigin)) return original(input, init);
+
+    // Public tier hydration is intentionally credential-less and does not rely
+    // on the anonymous wm-session cookie. Let this exact request shape reach
+    // the native fetch even while session recovery is cooling down; otherwise
+    // the interceptor's synthetic 503 prevents the public CDN path from
+    // restoring the dashboard. Keep the bypass narrow so arbitrary bootstrap
+    // reads cannot opt out of the normal session machinery.
+    if (isCredentiallessPublicDataRequest(input, init, url)) return original(input, init);
 
     // Premium routes have a dedicated auth-injection layer
     // (`installWebApiRedirect`'s `enrichInitForPremium` adds Clerk Bearer JWT,
@@ -329,12 +402,12 @@ export function installWmSessionFetchInterceptor(): void {
       const recovery = (async (): Promise<Response | null> => {
         const fresh = await ensureWmSession().catch(() => false);
         if (!fresh) {
-          markWmSessionDead();
+          markWmSessionDead('mint_failed');
           return null;
         }
         const retryResp = await sendWith(new Headers(headers), requestClone ?? input);
         if (retryResp.status === 401) {
-          markWmSessionDead();
+          markWmSessionDead('retry_401');
           return null;
         }
         return retryResp;

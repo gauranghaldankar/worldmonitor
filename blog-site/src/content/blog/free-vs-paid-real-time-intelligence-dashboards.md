@@ -4,7 +4,7 @@ description: "What free intelligence dashboards actually include, what paid tier
 metaTitle: "Free vs Paid Intelligence Dashboards: Buyer's Comparison 2026"
 keywords: "free vs paid intelligence dashboard, real-time intelligence dashboard comparison, free OSINT dashboard, intelligence platform pricing, geopolitical dashboard cost, situational awareness tools comparison, free intelligence tools 2026"
 audience: "Buyers evaluating intelligence tooling, analysts justifying budget, procurement teams, researchers deciding whether to upgrade"
-heroImage: "/blog/og/free-vs-paid-real-time-intelligence-dashboards.png"
+heroImage: "/blog/images/blog/free-vs-paid-real-time-intelligence-dashboards.jpg"
 pubDate: "2026-07-07"
 ---
 

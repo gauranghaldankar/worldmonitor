@@ -151,6 +151,26 @@ describe('server catalog extraction (#4920a)', () => {
     const feeds = extractServerFeeds();
     assert.ok(feeds.some((f) => f.name === "Tom's Hardware"), 'double-quoted names must not be skipped');
   });
+
+  it('uses Nature\'s canonical RSS endpoint with the runtime redirect budget', () => {
+    const canonicalNatureUrl = 'https://www.nature.com/nature.rss';
+    const natureFeed = extractServerFeeds().find((feed) => feed.name === 'Nature News');
+    assert.equal(natureFeed?.url, canonicalNatureUrl, 'server digest must use Nature\'s canonical RSS URL');
+
+    const clientFeeds = readSrc('src/config/feeds.ts');
+    assert.ok(
+      clientFeeds.includes(`{ name: 'Nature News', url: rss('${canonicalNatureUrl}') }`),
+      'client catalog must use the same canonical Nature RSS endpoint',
+    );
+
+    const validator = readSrc('scripts/validate-rss-feeds.mjs');
+    assert.match(validator, /const MAX_REDIRECTS = 3;/);
+    assert.match(
+      validator,
+      /for \(let redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount\+\+\)/,
+      'CI validator must allow the same three redirects as the runtime RSS proxy',
+    );
+  });
 });
 
 describe('coverage-ledger and provenance wiring (source-textual)', () => {

@@ -34,6 +34,10 @@ import {
   type UpstreamSnapshot,
 } from './checkout-errors';
 import { showCheckoutErrorToast } from './checkout-error-toast';
+import {
+  createDefaultCheckoutTransportDeps,
+  postCreateCheckout,
+} from './checkout-transport';
 import { decideNoUserPathOutcome } from './checkout-no-user-policy';
 import { shouldSkipSentryForAction } from './checkout-sentry-policy';
 import { isEntitled, onEntitlementChange } from './entitlements';
@@ -818,10 +822,13 @@ export async function startCheckout(
       return false;
     }
 
-    const resp = await fetch('/api/create-checkout', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify({
+    // Transient CF/origin 502s on this POST are retried once with an
+    // Idempotency-Key (server dedupes replays — api/_idempotency.ts).
+    // WORLDMONITOR-Q4: without this, every transient was a lost checkout.
+    const resp = await postCreateCheckout(createDefaultCheckoutTransportDeps(), {
+      url: '/api/create-checkout',
+      token,
+      payload: {
         productId,
         returnUrl: buildDashboardCheckoutReturnUrl(window.location.origin),
         discountCode: options?.discountCode,
@@ -829,8 +836,7 @@ export async function startCheckout(
         // #4438: only set when the user confirmed "start a new checkout anyway"
         // from the pending-payment dialog. Skips the backend pending guard.
         ...(options?.bypassPendingGuard ? { bypassPendingGuard: true } : {}),
-      }),
-      signal: AbortSignal.timeout(15_000),
+      },
     });
 
     if (!resp.ok) {

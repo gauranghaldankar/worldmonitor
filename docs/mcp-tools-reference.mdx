@@ -202,7 +202,7 @@ Macro economic indicators: Fed Funds rate (FRED), economic calendar events, fuel
 
 | Name | Type | Description |
 |------|------|-------------|
-| `dataset` | `array<string: fedfunds / econ-calendar / fuel-prices / ecb-fx-rates / yield-curve-eu / spending / earnings-calendar / cot / dsr / property-residential / property-commercial>` | Restrict the response to one or more sub-datasets. Omit for the full economic bundle. |
+| `dataset` | `array<string: fedfunds / econ-calendar / china-macro / china-release-calendar / fuel-prices / ecb-fx-rates / yield-curve-eu / spending / earnings-calendar / cot / dsr / property-residential / property-commercial>` | Restrict the response to one or more sub-datasets. Omit for the full economic bundle. |
 | `country` | string | Filter the country-keyed datasets (fuel-prices, BIS DSR/property, economic calendar) to one ISO 3166-1 alpha-2 code. |
 | `limit` | number | Cap each list dataset (calendar, spending, earnings) to at most this many items (default 30, pass 0 for no cap). |
 
@@ -220,6 +220,46 @@ curl -s https://worldmonitor.app/mcp \
     "jsonrpc":"2.0","id":1,
     "method":"tools/call",
     "params":{"name":"get_economic_data","arguments":{}}
+  }'
+```
+
+</CodeGroup>
+
+### `get_procurement_opportunities`
+
+Search active global public-procurement opportunities through the canonical Pro-gated tender API. The tool never reads Upstash directly. It returns a compact projection of the canonical records: official notice URL, source, title, buyer, timing, money, categories, sectors, `participationMode`, and compact `automationFit`; it deliberately omits descriptions, eligibility requirements, and submission URLs.
+
+**Parameters (tool-specific):**
+
+| Name | Type | Description |
+|------|------|-------------|
+| `country` | string | One ISO 3166-1 alpha-2 country code. |
+| `countries` | `array<string>` | Additional country codes; combines with `country`. |
+| `source` | string | Official source adapter, such as `sam`, `ted`, `contracts-finder`, `canada-buys`, `gets`, or `world-bank`. |
+| `query` | string | Case-insensitive text search across titles and descriptions. |
+| `buyer` | string | Case-insensitive buyer or contracting-authority text. |
+| `deadline_from` / `deadline_to` | string | ISO-8601 inclusive deadline range. |
+| `sort` | `string: newest / closing_soon / estimated_value / relevance` | Result ordering; defaults to `newest`. |
+| `min_automation_score` | integer | Optional keyword-relevance score threshold. Positive integers are passed to the canonical route (which clamps values above 100); non-integer and non-positive values are ignored. It is opt-in and is **not** bidding-eligibility evidence. |
+| `page_size` | integer | Default **10**, maximum **25** records. This is the MCP output budget; the REST route itself permits up to 100. |
+| `cursor` | string | Opaque `nextCursor` from the preceding result; keep the same filters and sort while paging. |
+
+- **API endpoint:** `GET /api/economic/v1/list-global-tenders`
+- **Kind:** bounded canonical-route proxy — Pro entitlement remains enforced by the downstream route; no bootstrap or direct-cache exposure.
+- **Output budget:** 10 compact records by default, at most 25. The result retains `nextCursor`, `total`, `appliedFilters`, `countryCoverage`, `availability`, snapshot time, and per-source health summaries. An empty `nextCursor` means there are no further pages.
+
+Unfiltered calls preserve the standard all-open-opportunities behavior; `min_automation_score` is never implied. `automationFit` is keyword relevance evidence only, never a legal determination of whether an agent or vendor may bid. `participationMode: "unknown"` means exactly that — no participation mode was established upstream.
+
+<CodeGroup>
+
+```bash curl
+curl -s https://worldmonitor.app/mcp \
+  -H "X-WorldMonitor-Key: $WM_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "jsonrpc":"2.0","id":1,
+    "method":"tools/call",
+    "params":{"name":"get_procurement_opportunities","arguments":{"country":"US","min_automation_score":70,"page_size":10,"sort":"relevance"}}
   }'
 ```
 
@@ -910,6 +950,7 @@ Dry bulk shipping stress index, customs revenue flows, and COMTRADE bilateral tr
 |------|------|-------------|
 | `dataset` | `array<string: shipping_stress / customs-revenue / flows>` | Restrict the response to one or more sub-datasets (dry-bulk shipping stress / customs revenue / COMTRADE flows). Omit for all. |
 | `commodity` | string | Filter COMTRADE flows to one commodity — matches the HS code exactly or the commodity description by substring (e.g. "2709" or "crude"). |
+| `reporter` | string | Filter COMTRADE flows to one reporter by numeric reporter code or reporter name (e.g. "156" or "China"). |
 | `limit` | number | Cap each list dataset (carriers, months, flows) to at most this many items (default 30, pass 0 for no cap). |
 
 - **API endpoints:** `GET /api/supply-chain/v1/get-shipping-stress`, `GET /api/trade/v1/get-customs-revenue`

@@ -4,7 +4,7 @@ description: "Give Claude, Cursor, or your own AI agent live conflict, market, m
 metaTitle: "Build a Geopolitical Risk Agent with WorldMonitor MCP"
 keywords: "geopolitical risk agent, MCP intelligence server, WorldMonitor MCP, AI agent geopolitical data, real-time intelligence MCP"
 audience: "AI builders, developers, risk analysts, agent engineers"
-heroImage: "/blog/og/build-geopolitical-risk-agent-worldmonitor-mcp.png"
+heroImage: "/blog/images/blog/build-geopolitical-risk-agent-worldmonitor-mcp.jpg"
 pubDate: "2026-06-10"
 modifiedDate: "2026-06-13"
 ---

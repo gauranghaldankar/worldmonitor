@@ -612,7 +612,7 @@ export const CACHE_TOOLS: ToolDef[] = [
   {
     name: 'get_economic_data',
     _outputBudgetBytes: 131072,
-    description: 'Macro economic indicators: Fed Funds rate (FRED), economic calendar events, fuel prices, ECB FX rates, EU yield curve, earnings calendar, COT positioning, energy storage data, BIS household debt service ratio (DSR, quarterly, leading indicator of household financial stress across ~40 advanced economies), and BIS residential + commercial property price indices (real, quarterly).',
+    description: 'Macro economic indicators: Fed Funds rate (FRED), economic calendar events, the normalized China macro snapshot plus official NBS/PBoC release calendar, fuel prices, ECB FX rates, EU yield curve, earnings calendar, COT positioning, energy storage data, BIS household debt service ratio (DSR, quarterly, leading indicator of household financial stress across ~40 advanced economies), and BIS residential + commercial property price indices (real, quarterly).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -620,7 +620,7 @@ export const CACHE_TOOLS: ToolDef[] = [
           type: 'array',
           items: {
             type: 'string',
-            enum: ['fedfunds', 'econ-calendar', 'fuel-prices', 'ecb-fx-rates', 'yield-curve-eu', 'spending', 'earnings-calendar', 'cot', 'dsr', 'property-residential', 'property-commercial'],
+            enum: ['fedfunds', 'econ-calendar', 'china-macro', 'china-release-calendar', 'fuel-prices', 'ecb-fx-rates', 'yield-curve-eu', 'spending', 'earnings-calendar', 'cot', 'dsr', 'property-residential', 'property-commercial'],
           },
           description: 'Restrict the response to one or more sub-datasets. Omit for the full economic bundle.',
         },
@@ -641,6 +641,23 @@ export const CACHE_TOOLS: ToolDef[] = [
         type: ['object', 'null'],
         properties: { events: { type: 'array', items: { type: 'object', properties: {
           country: { type: 'string' }, event: { type: 'string' }, time: { type: ['string', 'number'] },
+        } } } },
+      },
+      'china-macro': {
+        type: ['object', 'null'],
+        properties: {
+          countryCode: { type: 'string' }, launchReady: { type: 'boolean' }, status: { type: 'string' },
+          indicators: { type: 'array', items: { type: 'object', properties: {
+            id: { type: 'string' }, label: { type: 'string' }, category: { type: 'string' },
+            value: { type: ['number', 'null'] }, priorValue: { type: ['number', 'null'] }, unit: { type: 'string' },
+            observationDate: { type: 'string' }, source: { type: 'string' }, stale: { type: 'boolean' }, unavailableReason: { type: 'string' },
+          } } },
+        },
+      },
+      'china-release-calendar': {
+        type: ['object', 'null'],
+        properties: { events: { type: 'array', items: { type: 'object', properties: {
+          event: { type: 'string' }, countryCode: { type: 'string' }, releaseDate: { type: 'string' }, status: { type: 'string' }, source: { type: 'string' },
         } } } },
       },
       'fuel-prices': {
@@ -678,11 +695,14 @@ export const CACHE_TOOLS: ToolDef[] = [
       if (countries.length > 0) {
         narrowNested(data, 'fuel-prices', 'countries', (c) => matchesCode(c.code, countries));
         narrowNested(data, 'econ-calendar', 'events', (e) => matchesCode(e.country, countries));
+        narrowNested(data, 'china-release-calendar', 'events', (e) => matchesCode(e.countryCode, countries));
+        if (!countries.some((code) => code.toUpperCase() === 'CN')) data['china-macro'] = null;
         for (const label of ['dsr', 'property-residential', 'property-commercial']) {
           narrowNested(data, label, 'entries', (e) => matchesCode(e.countryCode, countries));
         }
       }
       capNested(data, 'econ-calendar', 'events', limit);
+      capNested(data, 'china-release-calendar', 'events', limit);
       capNested(data, 'spending', 'awards', limit);
       capNested(data, 'earnings-calendar', 'earnings', limit);
       return selectDatasets(data, argStrList(params.dataset));
@@ -690,6 +710,8 @@ export const CACHE_TOOLS: ToolDef[] = [
     _cacheKeys: [
       'economic:fred:v1:FEDFUNDS:0',
       'economic:econ-calendar:v1',
+      'economic:china:macro:v1',
+      'economic:china:release-calendar:v1',
       'economic:fuel-prices:v1',
       'economic:ecb-fx-rates:v1',
       'economic:yield-curve-eu:v1',
@@ -704,6 +726,8 @@ export const CACHE_TOOLS: ToolDef[] = [
     _maxStaleMin: 1440,
     _freshnessChecks: [
       { key: 'seed-meta:economic:econ-calendar', maxStaleMin: 1440 },
+      { key: 'seed-meta:economic:china-macro', maxStaleMin: 4320 },
+      { key: 'seed-meta:economic:china-release-calendar', maxStaleMin: 4320 },
       // Per-dataset BIS seed-meta keys — the aggregate
       // `seed-meta:economic:bis-extended` would report "fresh" even if only
       // one of the three datasets (DSR / SPP / CPP) is current, matching the
@@ -715,6 +739,7 @@ export const CACHE_TOOLS: ToolDef[] = [
     _apiPaths: [
       "GET /api/economic/v1/get-ecb-fx-rates",
       "GET /api/economic/v1/get-economic-calendar",
+      "GET /api/economic/v1/get-china-macro-snapshot",
       "GET /api/economic/v1/get-eu-yield-curve",
       "GET /api/economic/v1/list-fuel-prices",
       "GET /api/market/v1/get-cot-positioning",
@@ -1399,6 +1424,10 @@ export const CACHE_TOOLS: ToolDef[] = [
           type: 'string',
           description: 'Filter COMTRADE flows to one commodity — matches the HS code exactly or the commodity description by substring (e.g. "2709" or "crude").',
         },
+        reporter: {
+          type: 'string',
+          description: 'Filter COMTRADE flows to one reporter by numeric reporter code or reporter name (e.g. "156" or "China").',
+        },
         limit: { type: 'number', description: 'Cap each list dataset (carriers, months, flows) to at most this many items (default 30, pass 0 for no cap).' },
       },
       required: [],
@@ -1427,9 +1456,13 @@ export const CACHE_TOOLS: ToolDef[] = [
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     _postFilter: (data, params) => {
       const commodity = argStr(params.commodity);
+      const reporter = argStr(params.reporter);
       const limit = (argNum(params.limit) ?? DEFAULT_LIST_LIMIT);
       if (commodity) {
         narrowNested(data, 'flows', 'flows', (f) => argStr(f.cmdCode) === commodity || ciIncludes(f.cmdDesc, commodity));
+      }
+      if (reporter) {
+        narrowNested(data, 'flows', 'flows', (f) => argStr(f.reporterCode) === reporter || ciIncludes(f.reporterName ?? f.reporter, reporter));
       }
       capNested(data, 'shipping_stress', 'carriers', limit);
       capNested(data, 'customs-revenue', 'months', limit);
@@ -1852,6 +1885,7 @@ export const CACHE_TOOLS: ToolDef[] = [
           rollingWindowDays: { type: ['number', 'null'] },
           totals: { type: ['object', 'null'] },
           overall: { type: ['object', 'null'] },
+          skill: { type: ['object', 'null'] },
           byDomain: { type: 'array', items: { type: 'object' } },
           byGenerationOrigin: { type: 'array', items: { type: 'object' } },
           calibration: { type: 'array', items: { type: 'object' } },

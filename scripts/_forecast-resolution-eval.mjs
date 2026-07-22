@@ -9,8 +9,11 @@ import { readFileSync } from 'node:fs';
 const DAY_MS = 24 * 60 * 60 * 1000;
 export const ACLED_SETTLEMENT_LAG_MS = 2 * DAY_MS;
 export const UCDP_SETTLEMENT_LAG_MS = 14 * DAY_MS;
+// Grace window for a `value` feed to publish the deadline period's reading
+// before we give up and VOID (EIA weekly releases can slip on holidays).
+export const VALUE_SETTLEMENT_MAX_LAG_MS = 10 * DAY_MS;
 
-const SUPPORTED_FUNCTIONS = new Set(['count', 'riskScore', 'present', 'yesPrice', 'hexCount', 'price']);
+const SUPPORTED_FUNCTIONS = new Set(['count', 'riskScore', 'present', 'yesPrice', 'hexCount', 'price', 'value']);
 const COUNTRY_ALIASES = loadCountryAliases();
 
 export function countSettlementLagMs(feedKey) {
@@ -56,6 +59,22 @@ export function resolveHardSpec(entry, feedData, samples, nowMs) {
   const deadline = Number(spec.deadline ?? entry.deadline);
   if (nowMs < deadline) {
     return { status: 'pending', evidence: { reason: 'deadline_not_reached', deadline } };
+  }
+
+  // Settlement gate for scalar `value`/`price` reads at a POINT window
+  // (at-deadline). Like count(), a premature or STALE read scores a false
+  // YES/NO: a period feed (EIA weekly, dated by `asOf`) may still hold the prior
+  // period's value, and a live feed kept warm through a fetch failure
+  // (commodities, whose shaper stamps each quote with the envelope
+  // `_seed.fetchedAt` as `asOf`) may hold a quote dated days before the
+  // deadline. Only resolve once the matched record is dated on/after the
+  // deadline day; pend until then, VOID if it never settles. Records with no
+  // timestamp fall through (cannot gate). within-horizon is exempt — it resolves
+  // from the asOf-stamped sample timeline, not the current feed record.
+  const isPointWindow = spec.window === 'at-deadline' || spec.window === 'at-endDate';
+  if (isPointWindow && (parsed.fn === 'value' || parsed.fn === 'price')) {
+    const settle = valueSettlementResult(parsed, feedData, deadline, nowMs, entry, spec);
+    if (settle) return settle;
   }
 
   if (parsed.fn === 'count') {
@@ -155,12 +174,42 @@ export function resolveHardSpec(entry, feedData, samples, nowMs) {
   return voidResult('unsupported_window', entry, spec, parsed, nowMs);
 }
 
-export function extractMetricValue(parsed, feedData) {
+// Freshness gate for a scalar `value` read: is the matched record dated on or
+// after the deadline day? Returns null when settled (or when the record carries
+// no usable timestamp, so we can't gate — fall through to normal resolution),
+// a pending result while within the grace window, or VOID once grace elapses.
+function valueSettlementResult(parsed, feedData, deadline, nowMs, entry, spec) {
   const record = findMatchingRecord(feedData, parsed.field, parsed.value);
-  if (parsed.fn === 'present') return record ? 1 : 0;
-  if (!record) return NaN;
+  if (!record) {
+    // Whole-feed-down is handled by the window path (source_feed_unavailable);
+    // here the feed is PRESENT but the matched record is absent — a partial
+    // refresh that dropped this symbol. Pend through the grace so a transient
+    // gap doesn't immediately VOID; VOID only if it never returns (#5243 P2).
+    if (feedData == null) return null;
+    if (nowMs < deadline + VALUE_SETTLEMENT_MAX_LAG_MS) {
+      return { status: 'pending', evidence: { reason: 'value_source_record_missing', deadline } };
+    }
+    return voidResult('value_source_never_settled', entry, spec, parsed, nowMs);
+  }
+  const asOf = parseAsOfMs(record.asOf ?? record.date);
+  if (!Number.isFinite(asOf)) return null; // record present but no timestamp → cannot gate
+  const deadlineDay = Math.floor(deadline / DAY_MS) * DAY_MS;
+  if (asOf >= deadlineDay) return null; // feed has caught up to the deadline period
+  if (nowMs < deadline + VALUE_SETTLEMENT_MAX_LAG_MS) {
+    return { status: 'pending', evidence: { reason: 'value_source_not_settled', deadline, asOf } };
+  }
+  return voidResult('value_source_never_settled', entry, spec, parsed, nowMs);
+}
 
-  switch (parsed.fn) {
+function parseAsOfMs(value) {
+  if (value == null) return NaN;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : NaN;
+  const parsed = Date.parse(String(value));
+  return Number.isFinite(parsed) ? parsed : NaN;
+}
+
+function valueFromRecord(fn, record) {
+  switch (fn) {
     case 'riskScore':
       return firstFinite(record.riskScore, record.risk_score, record.score, record.risk);
     case 'yesPrice':
@@ -169,9 +218,42 @@ export function extractMetricValue(parsed, feedData) {
       return firstFinite(record.hexCount, record.hex_count, record.hexes, record.count);
     case 'price':
       return firstFinite(record.price, record.last, record.value);
+    case 'value':
+      // Generic scalar read for numeric feeds (energy/economic bet engine,
+      // #5233). Feed loaders shape a metric snapshot into records carrying
+      // `value` (with `current` as the natural fallback for period feeds).
+      return firstFinite(record.value, record.current, record.last, record.price);
     default:
       return NaN;
   }
+}
+
+export function extractMetricValue(parsed, feedData) {
+  const record = findMatchingRecord(feedData, parsed.field, parsed.value);
+  if (parsed.fn === 'present') return record ? 1 : 0;
+  if (!record) return NaN;
+  return valueFromRecord(parsed.fn, record);
+}
+
+// Value AND the source observation time (`asOf`) of the matched record. Callers
+// that STORE a sample must stamp it with this asOf, not the cycle time — a stale
+// kept-warm reading carries a pre-deadline asOf, so stamping it with the cycle
+// time would let a settlement-gated resolution later prefer that stale sample
+// over the fresh feed (#5243 P1). asOf is null when the record has no timestamp.
+export function extractMetricObservation(parsed, feedData) {
+  const record = findMatchingRecord(feedData, parsed.field, parsed.value);
+  // present() is a boolean existence check: a missing matched record means the
+  // event did NOT occur → observe 0, NOT NaN. Returning NaN here (as the initial
+  // refactor did) makes a quiet subject store an error sample instead of a valid
+  // 0, so a legitimately-NO within-horizon spec strands with an empty timeline
+  // and VOIDs. Mirror extractMetricValue's `record ? 1 : 0`.
+  if (parsed.fn === 'present') {
+    const asOf = record ? parseAsOfMs(record.asOf ?? record.date) : NaN;
+    return { value: record ? 1 : 0, asOf: Number.isFinite(asOf) ? asOf : null };
+  }
+  if (!record) return { value: NaN, asOf: null };
+  const asOf = parseAsOfMs(record.asOf ?? record.date);
+  return { value: valueFromRecord(parsed.fn, record), asOf: Number.isFinite(asOf) ? asOf : null };
 }
 
 function compareResult(value, spec, entry, parsed, nowMs, extraEvidence = {}) {

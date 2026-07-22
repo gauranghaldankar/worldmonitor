@@ -4,7 +4,7 @@ description: "How Scenario Engine turns chokepoint, trade, and HS2 exposure data
 metaTitle: "Supply Chain Scenario Engine Stress Test | WorldMonitor"
 keywords: "supply chain scenario engine, geopolitical stress test, chokepoint scenario, supply chain risk simulation, trade exposure analysis"
 audience: "Supply chain teams, commodity desks, risk managers, policy analysts"
-heroImage: "/blog/og/stress-test-supply-chain-scenario-engine-worldmonitor.png"
+heroImage: "/blog/images/blog/stress-test-supply-chain-scenario-engine-worldmonitor.jpg"
 pubDate: "2026-06-13"
 ---
 

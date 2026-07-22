@@ -4,7 +4,7 @@ description: "A reusable 72-hour retro template for investigating whether signal
 metaTitle: "72-Hour Geopolitical Event Retro Template | WorldMonitor"
 keywords: "geopolitical event retro, intelligence after action review, 72 hour crisis analysis, early warning template, OSINT workflow"
 audience: "Analysts, risk teams, OSINT researchers, security leads, editorial teams"
-heroImage: "/blog/og/72-hour-geopolitical-event-retro-template-worldmonitor.png"
+heroImage: "/blog/images/blog/72-hour-geopolitical-event-retro-template-worldmonitor.jpg"
 pubDate: "2026-06-13"
 ---
 

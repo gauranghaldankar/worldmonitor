@@ -4,7 +4,7 @@ description: "How WorldMonitor uses 2024 production data and Herfindahl-Hirschma
 metaTitle: "Critical Minerals HHI Supply Risk Explained | WorldMonitor"
 keywords: "critical minerals HHI, Herfindahl Hirschman Index minerals, supply concentration risk, rare earth supply risk, lithium cobalt gallium germanium"
 audience: "Supply chain teams, policy analysts, commodity researchers, semiconductor and battery strategists"
-heroImage: "/blog/og/critical-minerals-hhi-supply-risk-explained.png"
+heroImage: "/blog/images/blog/critical-minerals-hhi-supply-risk-explained.jpg"
 pubDate: "2026-06-13"
 ---
 

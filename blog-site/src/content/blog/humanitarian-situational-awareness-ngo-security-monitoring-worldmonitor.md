@@ -4,7 +4,7 @@ description: "A field-security workflow for NGOs using displacement, humanitaria
 metaTitle: "Humanitarian Situational Awareness Workflow | WorldMonitor"
 keywords: "humanitarian situational awareness, NGO security monitoring, displacement monitoring, humanitarian risk dashboard, field security workflow"
 audience: "NGO security teams, humanitarian operations leads, field program managers, crisis analysts"
-heroImage: "/blog/og/humanitarian-situational-awareness-ngo-security-monitoring-worldmonitor.png"
+heroImage: "/blog/images/blog/humanitarian-situational-awareness-ngo-security-monitoring-worldmonitor.jpg"
 pubDate: "2026-06-13"
 ---
 

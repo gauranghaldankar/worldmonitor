@@ -10,8 +10,9 @@
 > registry before merging. Both `tests/scripts-railway-nixpacks-no-escape-import.test.mts`
 > and `tests/dockerfile-digest-notifications-imports.test.mjs` derive their entry
 > lists from the registry, and `tests/railway-services-registry-coverage.test.mts`
-> fails if a `Dockerfile.*` CMD or a runbook "Start command:" entry references a
-> script the registry doesn't know about.
+> fails if a `Dockerfile.*` CMD, runbook "Start command:" entry, or standalone
+> service row references a script the registry doesn't know about. The
+> scripts-root guard also conservatively scans unregistered legacy seeders.
 
 ---
 
@@ -20,6 +21,118 @@
 1. Merge PR #2891 to `main`
 2. Verify the bundle scripts are in the deployed branch
 3. Have Railway dashboard access and `gh` CLI authenticated
+
+---
+
+## Deployment safety guardrails
+
+### Watch paths are a live contract
+
+Railway stores watch paths in each service's environment configuration, not in
+the repository. The repo-side contract is
+`scripts/audit-railway-watch-paths.mjs`: every WorldMonitor Railway seeder,
+including Dockerfile and repo-root services, must either have no watch filter
+(watch the whole repo) or include both `scripts/**` and `shared/**`. Enumerating
+the current entry file and known helpers is unsafe because the next helper can
+be added without updating the dashboard list.
+
+After linking the CLI to the `world-monitor` production environment, audit the
+live settings with:
+
+```bash
+node scripts/audit-railway-watch-paths.mjs
+```
+
+To reconcile only drifted seeders and verify the read-back:
+
+```bash
+node scripts/audit-railway-watch-paths.mjs --apply
+```
+
+The apply mode changes only `build.watchPatterns`, preserves any existing paths
+outside those broad directories, uses one environment config commit, and waits
+for Railway's eventually consistent config read-back before reporting success.
+Run the audit after adding or replacing a standalone seeder.
+
+### Bootstrap R2 publisher contract
+
+The public bootstrap tiers use the dedicated private bucket
+`worldmonitor-bootstrap`. Managed `r2.dev` access stays disabled and the bucket
+has no custom domain; clients continue to enter through `/api/bootstrap` so the
+WAF, origin policy, rate limits, telemetry, and future access controls remain in
+the request path.
+
+This service is an always-on publisher, not a Railway cron. Configure it with
+`Dockerfile.publish-bootstrap-tiers` (the root application Dockerfile does not
+contain the publisher) and start command
+`node scripts/publish-bootstrap-tiers.mjs --loop`, **no cron schedule**, and
+watch paths `scripts/**`, `shared/**`. It publishes both tiers on startup, then
+fast every two minutes and slow every ten minutes. Keep Redis authoritative:
+until the publisher and later rollout gates pass, `/api/bootstrap` continues to
+serve its existing Redis assembly.
+
+The environment contract is deliberately split by consumer:
+
+| Scope | Variables | Install in | Capability |
+|---|---|---|---|
+| Shared routing and tier shape | `R2_ACCOUNT_ID`, optional `R2_ENDPOINT`, `R2_BOOTSTRAP_BUCKET=worldmonitor-bootstrap`, `IRAN_EVENTS_ENABLED` | Railway production and Vercel production | Names plus the feature flag that controls `iranEvents` tier membership; values must match |
+| Publisher | `R2_BOOTSTRAP_ACCESS_KEY_ID`, `R2_BOOTSTRAP_SECRET_ACCESS_KEY` | Railway production publisher only | Publisher can PUT and GET only in `worldmonitor-bootstrap` |
+| Edge reader | `R2_BOOTSTRAP_READ_KEY_ID`, `R2_BOOTSTRAP_READ_SECRET` | Vercel production only | Edge can GET; it cannot PUT or DELETE, and cannot read `worldmonitor-data` |
+
+Preview and development do not receive either credential; missing credentials
+must use the Redis path. The publisher must not fall back to any
+`CLOUDFLARE_R2_*` account, bucket, key, secret, or API token. Never copy the
+publisher credential into Vercel or the edge credential into Railway, and never
+add a `VITE_` alias for any bootstrap R2 credential. Set
+`IRAN_EVENTS_ENABLED` explicitly to the same value in both production services;
+otherwise the publisher and edge handler resolve different tier contents.
+
+Provision and release in this order:
+
+1. Create the repo-root Railway service, install only the shared and publisher
+   variables above, and confirm the live watch paths and lack of a cron schedule.
+2. Deploy the publisher before enabling shadow measurement or serving from R2.
+3. Parse both `fast.json` and `slow.json`, then verify `generatedAt` advances in
+   two successive publishes for each tier.
+4. Install only the shared and read-only variables in Vercel production. Keep
+   them absent from preview and development.
+5. Run the negative permission probes: publisher cannot access
+   `worldmonitor-data`; edge cannot write/delete in `worldmonitor-bootstrap` and
+   cannot read `worldmonitor-data`.
+
+Rotate one consumer at a time: create a replacement token, update that consumer,
+verify its publish or read with the replacement, then revoke the old token. On
+suspected compromise, revoke first; Redis fallback preserves availability while
+a replacement is issued. Never log, commit, or copy credential values into an
+incident note.
+
+### Merged does not mean deployed
+
+`.github/workflows/seed-freshness-monitor.yml` runs every 15 minutes on the
+default branch. It first requires the latest `main` commit's `gate` status to
+be green, then checks public compact health and fails when any seed metadata is
+older than its `maxStaleMin` threshold (`STALE_SEED`). This is the alert for the
+"green main, stale Railway image" gap; the existing compact health monitor
+continues to cover critical `EMPTY`/`EMPTY_DATA` and Redis failures.
+
+Do not use `railway redeploy` to recover a bad or stale source deployment.
+Railway documents redeploy as rebuilding the most recent deployment with the
+same code, so it cannot pick up a newer fixed commit. From a clean checkout
+whose `HEAD` equals current `origin/main`, upload the current source instead:
+
+```bash
+git fetch origin
+git rev-parse HEAD
+git rev-parse origin/main
+railway up --service <service-name> --environment production --detach
+```
+
+Alternatively, Railway's dashboard **Deploy Latest Commit** action deploys the
+latest commit from the service's default GitHub branch. After either recovery
+path, verify the deployment commit SHA and the relevant compact-health problem
+have both advanced. See Railway's official
+[redeploy CLI reference](https://docs.railway.com/cli/redeploy) and
+[deployment actions reference](https://docs.railway.com/deployments/deployment-actions).
 
 ---
 
@@ -57,11 +170,11 @@ contract needs to be made fully uniform beyond shared `runSeed` users.
 
 ## Services to DELETE (46 total)
 
-### Standalone delete (no bundle replacement needed)
+### Standalone service retired before bundle restoration
 
 | # | Service Name | Service ID | Reason |
 |---|---|---|---|
-| 1 | seed-defense-patents (DISABLED) | `6f8bfd1b-7ccc-4db5-b03c-a2075b173e91` | Already disabled, no data flowing |
+| 1 | seed-defense-patents (DISABLED) | `6f8bfd1b-7ccc-4db5-b03c-a2075b173e91` | Standalone remains deleted; producer restored in `seed-bundle-static-ref` using USPTO ODP |
 
 ### Replaced by seed-bundle-ecb-eu
 
@@ -217,9 +330,18 @@ All new services share these settings:
 | **Start command** | `node scripts/seed-bundle-static-ref.mjs` |
 | **Cron schedule** | `0 3 * * 0` (weekly, Sunday 03:00 UTC) |
 | **Watch paths** | `scripts/**`, `shared/**` |
-| **Replaces** | 3 services |
-| **Net savings** | 2 slots |
-| **Members** | Submarine Cables (weekly), Chokepoint Baselines (400d, runs rarely), Military Bases (30d, runs rarely) |
+| **Replaces** | 4 services (including the retired defense-patents producer) |
+| **Net savings** | 3 slots |
+| **Members** | Submarine Cables (weekly), Defense Patents (weekly), Chokepoint Baselines (400d, runs rarely), Military Bases (30d, runs rarely) |
+| **Required variable** | `USPTO_API_KEY=${{shared.USPTO_API_KEY}}` |
+
+Defense Patents is an intentional data-series migration, not a continuation of
+the former grant/issue series. USPTO ODP Patent File Wrapper records represent
+applications, so `date` is the application filing date and `abstract` remains
+empty for wire compatibility. The producer marks the discontinuity with
+`sourceVersion: uspto-odp-v1` and `schemaVersion: 2`; operational comparisons
+must not treat pre-migration grant dates and post-migration filing dates as one
+continuous metric.
 
 ### Bundle 4: seed-bundle-resilience
 
@@ -254,9 +376,9 @@ All new services share these settings:
 | **Start command** | `node scripts/seed-bundle-climate.mjs` |
 | **Cron schedule** | `0 */3 * * *` (every 3h) |
 | **Watch paths** | `scripts/**`, `shared/**` |
-| **Replaces** | 5 services |
-| **Net savings** | 4 slots |
-| **Members** | Zone Normals (monthly, skips ~359/360), Anomalies (3h, depends on zone-normals), Disasters (6h), Ocean Ice (daily), CO2 Monitoring (3 days) |
+| **Replaces** | 6 services |
+| **Net savings** | 5 slots |
+| **Members** | Natural Events (3h, EONET/GDACS/NHC/HKO), Zone Normals (monthly, skips ~359/360), Anomalies (3h, depends on zone-normals), Disasters (6h), Ocean Ice (daily), CO2 Monitoring (3 days) |
 | **Note** | Zone-normals runs before anomalies (dependency ordering) |
 
 ### Bundle 7: seed-bundle-energy-sources
@@ -291,9 +413,9 @@ All new services share these settings:
 | **Start command** | `node scripts/seed-bundle-health.mjs` |
 | **Cron schedule** | `0 */1 * * *` (hourly) |
 | **Watch paths** | `scripts/**`, `shared/**` |
-| **Replaces** | 4 services |
+| **Replaces** | 4 services plus the China control-plane evaluator |
 | **Net savings** | 3 slots |
-| **Members** | Air Quality (hourly), Disease Outbreaks (daily), VPD Tracker (daily), Displacement (daily) |
+| **Members** | China Coverage (hourly), Air Quality (hourly), Disease Outbreaks (daily), VPD Tracker (daily), Displacement (daily) |
 
 ### Bundle 10: seed-bundle-market-backup
 
@@ -318,8 +440,8 @@ All new services share these settings:
 | **Watch paths** | `scripts/**`, `shared/**` |
 | **Replaces** | 4 services |
 | **Net savings** | 3 slots |
-| **Members** | Climate News (30min), USA Spending (hourly), UCDP Events (6h), WB Indicators (daily) |
-| **Note** | These are BACKUP for ais-relay inline loops/child spawns. Each seed's freshness gate skips if the relay already refreshed the data recently. |
+| **Members** | Climate News (30min), USA Spending (hourly), Global Tenders (hourly), UCDP Events (6h), WB Indicators (daily) |
+| **Note** | Existing members are backups for ais-relay inline loops/child spawns; Global Tenders is hosted directly in this bundle. Each seed's freshness gate skips when the canonical data is already fresh. |
 
 ---
 
@@ -442,9 +564,9 @@ entries.
 > runs as its own Railway nixpacks cron service (root directory `.`, start
 > command `node scripts/<file>`, watch paths `scripts/**`, `shared/**`). They
 > are intentionally **not** part of the 100-service inventory count above and
-> are not in `scripts/railway-services.json` (the registry only covers bundles,
-> Dockerfile services, and long-running workers — standalone crons live here in
-> the runbook, like the 43 above).
+> are registered in `scripts/railway-services.json` with deploy mode
+> `nixpacks-root-repo`, so scripts-root packaging checks do not misclassify
+> their valid imports outside `scripts/`.
 >
 > **Cadence below is inferred from each seed's cache TTL** as a documentation
 > aid; confirm the live cron schedule and Service ID against the Railway
@@ -480,19 +602,18 @@ Start with lowest-risk, highest-savings bundles.
 | Order | Bundle | Slots Freed | Risk | Cron Frequency |
 |---|---|---|---|---|
 | 1 | seed-bundle-ecb-eu | 3 | Low (daily, same API) | Daily |
-| 2 | seed-bundle-static-ref | 2 | Low (weekly, static data) | Weekly |
+| 2 | seed-bundle-static-ref | 3 | Low (weekly, static data) | Weekly |
 | 3 | seed-bundle-resilience | 1 | Low (6h, annual window) | 6h |
 | 4 | seed-bundle-portwatch | 3 | Medium (hourly, 4 members) | Hourly |
 | 5 | seed-bundle-climate | 4 | Medium (3h, 5 members) | 3h |
 | 6 | seed-bundle-energy-sources | 5 | Medium (daily, 6 members) | Daily |
 | 7 | seed-bundle-macro | 5 | Medium (daily, 6 members) | Daily |
-| 8 | seed-bundle-health | 3 | Medium (hourly, 4 members) | Hourly |
+| 8 | seed-bundle-health | 3 | Medium (hourly, 5 members) | Hourly |
 | 9 | seed-bundle-derived-signals | 1 | Low (5min, Redis-only) | 5min |
 | 10 | seed-bundle-market-backup | 4 | Low (backup for relay) | 5min |
 | 11 | seed-bundle-relay-backup | 3 | Low (backup for relay) | 30min |
-| - | seed-defense-patents | 1 | None (already disabled) | - |
 
-**Running total:** 3 + 2 + 1 + 3 + 4 + 5 + 5 + 3 + 1 + 4 + 3 + 1 = **35 slots freed**
+**Running total:** 3 + 3 + 1 + 3 + 4 + 5 + 5 + 3 + 1 + 4 + 3 = **35 slots freed**
 
 ---
 
@@ -518,6 +639,7 @@ Each bundle service inherits the same env vars as the individual seeds it replac
 - `UPSTASH_REDIS_REST_TOKEN`
 - `NODE_OPTIONS=--dns-result-order=ipv4first`
 - Plus any API keys used by member seeds (GIE_API_KEY, ICAO_API_KEY, etc.)
+- `SAM_GOV_API_KEY` for the Global Tenders SAM.gov adapter. The other initial procurement adapters do not require credentials.
 
 The simplest approach: use Railway's "shared variables" or copy all env vars from the `worldmonitor` (ais-relay) service, which has a superset of all API keys.
 

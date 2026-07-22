@@ -4,7 +4,7 @@ description: "How analysts can monitor oil, gas, electricity, maritime chokepoin
 metaTitle: "Energy Shock Monitoring: Chokepoints | WorldMonitor"
 keywords: "energy shock monitoring, oil chokepoint dashboard, fuel shortage tracker, energy security intelligence, geopolitical energy risk"
 audience: "Energy analysts, commodity traders, policy teams, infrastructure risk managers"
-heroImage: "/blog/og/energy-shock-monitoring-chokepoints-worldmonitor.png"
+heroImage: "/blog/images/blog/energy-shock-monitoring-chokepoints-worldmonitor.jpg"
 pubDate: "2026-06-10"
 modifiedDate: "2026-06-13"
 ---

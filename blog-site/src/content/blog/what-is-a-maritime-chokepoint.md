@@ -4,7 +4,7 @@ description: "A plain-English explainer for maritime chokepoints, how WorldMonit
 metaTitle: "What Is a Maritime Chokepoint? | WorldMonitor"
 keywords: "maritime chokepoint, shipping chokepoint, Strait of Hormuz, Suez Canal, supply chain risk, chokepoint monitoring"
 audience: "Logistics teams, maritime analysts, commodity traders, students, geopolitical risk readers"
-heroImage: "/blog/og/what-is-a-maritime-chokepoint.png"
+heroImage: "/blog/images/blog/what-is-a-maritime-chokepoint.jpg"
 pubDate: "2026-06-13"
 ---
 

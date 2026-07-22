@@ -16,16 +16,29 @@
  * - searchGdeltDocuments: per-query GDELT search
  */
 
-import { loadEnvFile, CHROME_UA, runSeed, writeExtraKeyWithMeta, sleep, loadSharedConfig } from './_seed-utils.mjs';
+import { loadEnvFile, CHROME_UA, runSeed, writeExtraKeyWithMeta, sleep, loadSharedConfig, readSeedSnapshot } from './_seed-utils.mjs';
 import { fetchGdeltJson } from './_gdelt-fetch.mjs';
 import { buildGdeltConflictUrl, mapGdeltArticlesToEvents, GDELT_COUNTRY_NAMES } from './_conflict-gdelt.mjs';
+import { fetchGdeltBulkConflictEvents, GDELT_ROLLING_WINDOW_MS, mergeGdeltBulkRollingWindow } from './_conflict-gdelt-bulk.mjs';
 
 loadEnvFile(import.meta.url);
 
 const ACLED_API_URL = 'https://acleddata.com/api/acled/read';
 const ACLED_CACHE_KEY = 'conflict:acled:v1:all:0:0';
 const ACLED_RESOLUTION_CACHE_KEY = 'conflict:acled-resolution:v1:all:0:0';
-const ACLED_TTL = 900;
+// Data TTL for the conflict-events key. MUST outlive health's staleness threshold
+// for acledIntel (maxStaleMin 38 in api/health.js), or the key expires BEFORE
+// STALE_SEED can fire and a merely-late seeder reports as an EMPTY crit — while
+// consumers of the forecast EMA input get nothing at all.
+//
+// Was 900s (15 min) against a */15 cron: a TTL exactly equal to the refresh
+// interval, i.e. ZERO headroom. Railway SKIPS a tick whenever the previous run is
+// still in flight (11 skipped ticks in one 12h window), so one skip dropped the
+// data. Observed live: last good run 23 min old, key already gone, health crit.
+// 2700s = 45 min = 3x the interval, matching the convention in
+// seed-defense-patents.mjs (21d TTL for a weekly seed). Pinned by
+// tests/seed-ttl-outlives-health-staleness.
+export const ACLED_TTL = 2700;
 const ACLED_DISPLAY_LOOKBACK_DAYS = 30;
 const ACLED_DISPLAY_LIMIT = 500;
 const ACLED_RESOLUTION_LOOKBACK_DAYS = 60;
@@ -36,11 +49,14 @@ const HAPI_CACHE_KEY_PREFIX = 'conflict:humanitarian:v1';
 const HAPI_TTL = 21600;
 const PIZZINT_TTL = 600;
 
-const CONFLICT_COUNTRIES = [
+export const CONFLICT_COUNTRIES = [
   'AF', 'SY', 'UA', 'SD', 'SS', 'SO', 'CD', 'MM', 'YE', 'ET',
   'IQ', 'PS', 'LY', 'ML', 'BF', 'NE', 'NG', 'CM', 'MZ', 'HT',
 ];
 export const GDELT_MIN_SUCCESSFUL_COUNTRIES = Math.ceil(CONFLICT_COUNTRIES.length * 0.8);
+// A throttled failure, as it reaches us: fetchGdeltCountryEvents flattens the direct and
+// proxy attempts into one message, e.g. "...(last direct: HTTP 429) (last proxy: HTTP 429)".
+const RATE_LIMIT_ERROR = /\b429\b|rate.?limit|too many requests/i;
 // #5140: the GDELT fallback sweep may not LAUNCH a batch after this much of the
 // fetch phase has elapsed (fetchAll anchors the clock at its own entry and passes
 // an absolute deadline down, so slow aux feeds — HAPI is sequential, ~306s worst —
@@ -48,10 +64,11 @@ export const GDELT_MIN_SUCCESSFUL_COUNTRIES = Math.ceil(CONFLICT_COUNTRIES.lengt
 // in-flight batch may still drain past the cutoff: ≤~100s at the knobs below
 // (15s concurrent direct legs + 4 × 20s SERIALIZED sync proxy curls — curlFetch is
 // execFileSync, so "concurrent" proxy attempts block the event loop one at a time;
-// 92s observed live 2026-07-10). Worst single fetchAll attempt ≈
-// max(HAPI 306s, 120s + 100s) + extra-key writes ≈ ~350s, inside both the 360s
-// lock below and the 480s fetch deadline (lockTtl + margin). Without this cap a
+// 92s observed live 2026-07-10). Worst single fetchAll attempt before the bulk
+// fallback ≈ max(HAPI 306s, 120s + 100s). Without this cap a
 // GDELT brownout ran 5 batches ≈ 375s+ → deadline breach → exit 75 every tick.
+// The bulk fallback runs after those parallel feeds settle, so its 60s bound
+// and 30s publish slack are additive: max(306s, 220s) + 60s + 30s = 396s.
 export const GDELT_SWEEP_BUDGET_MS = 120_000;
 // maxRetries: 0 — a second direct attempt would honor GDELT's Retry-After header
 // (≤60s sleep, _gdelt-fetch.mjs MAX_RETRY_AFTER_MS), blowing any per-batch bound;
@@ -61,10 +78,10 @@ export const GDELT_SWEEP_BUDGET_MS = 120_000;
 export const GDELT_COUNTRY_FETCH_OPTS = Object.freeze({ maxRetries: 0, proxyMaxAttempts: 1 });
 // Lock must outlive the worst legitimate run (runSeed's documented invariant —
 // _seed-utils.mjs: "a healthy seeder is designed never to outlive its own lock");
-// it also sets the fetch deadline (lockTtlMs + 120s margin = 480s). The default
+// it also sets the fetch deadline (lockTtlMs + 120s margin = 540s). The default
 // 120s lock was ALREADY shorter than this seeder's worst case. Cron cadence is
-// 30min, so a hard-crashed run's dangling lock costs at most 6 of those minutes.
-export const ACLED_INTEL_LOCK_TTL_MS = 360_000;
+// 30min, so a hard-crashed run's dangling lock costs at most 7 of those minutes.
+export const ACLED_INTEL_LOCK_TTL_MS = 420_000;
 
 const ISO2_TO_ISO3 = loadSharedConfig('iso2-to-iso3.json');
 
@@ -209,14 +226,11 @@ async function fetchAcledEvents({
 
 // ─── GDELT conflict-events fallback (used when ACLED has no credentials) ───
 // ACLED requires a registered account. When its credentials are absent, keep a
-// near-real-time conflict signal by proxying GDELT DOC 2.0 coverage volume: per
-// priority country, count recent conflict-tagged articles and emit them as synthetic
-// events in the SAME {country, event_date} shape the EMA engine reads
-// (_ema-threat-engine.mjs). Article volume is a coarser proxy than ACLED event counts,
-// but it is keyless, near-real-time, and directionally valid for the per-country
-// escalation EMA. URL/query + article→event mapping live in the import-safe,
-// unit-tested _conflict-gdelt.mjs; this fn owns the throttle-aware fetch via
-// fetchGdeltJson's proxy path (GDELT is per-IP 429-throttled).
+// near-real-time conflict signal from GDELT. The DOC 2.0 path counts recent
+// conflict-tagged articles per priority country and emits synthetic events in the
+// SAME {country, event_date} shape the EMA engine reads (_ema-threat-engine.mjs).
+// When DOC coverage is throttled or yields no events, the official 15-minute bulk
+// event export supplies material-conflict records instead.
 export async function fetchGdeltCountryEvents(cc) {
   if (!GDELT_COUNTRY_NAMES[cc]) {
     return { country: cc, ok: false, events: [], error: 'unknown country code' };
@@ -234,9 +248,11 @@ export async function fetchGdeltCountryEvents(cc) {
 
 export async function fetchGdeltConflictEvents({
   fetchCountryEvents = fetchGdeltCountryEvents,
+  fetchBulkEvents = fetchGdeltBulkConflictEvents,
   pace = sleep,
   now = Date.now,
   deadlineAt,
+  loadPreviousSnapshot = () => readSeedSnapshot(ACLED_CACHE_KEY, { strict: true }),
 } = {}) {
   const events = [];
   const failedCountries = [];
@@ -267,14 +283,73 @@ export async function fetchGdeltConflictEvents({
         failedCountries.push({ country: result?.country || 'unknown', error: result?.error || 'unknown failure' });
       }
     }
+    // #5256: back off out of a rate-limit storm instead of grinding into it. On
+    // 2026-07-13 GDELT 429'd every country, direct AND through the proxy — reproducible
+    // off-Railway, so it is a GLOBAL throttle, not our egress. Once a whole batch comes
+    // back throttled with zero successes anywhere, the remaining batches cannot succeed
+    // either; they just burn the run window and deepen the limit we are already hitting.
+    // (The floor check above would stop us eventually, but only after ~2× the requests.)
+    // A throttled batch rarely comes back UNIFORMLY 429: under load GDELT also times out and
+    // tears TLS mid-handshake, so a real storm looks like 3×429 + 1×SSL. Requiring every
+    // result to be a 429 would miss that and grind on for another batch. Trigger on the
+    // honest signal instead — the whole batch failed, nothing has succeeded anywhere, and at
+    // least one failure is an explicit rate-limit.
+    const batchAllFailed = results.every(r => !r?.ok);
+    const anyRateLimited = results.some(r => RATE_LIMIT_ERROR.test(String(r?.error ?? '')));
+    if (batchAllFailed && anyRateLimited && successfulCountries === 0) {
+      const why = 'GDELT rate-limit storm (batch fully throttled, 0 successes)';
+      for (const cc of remaining.slice(CONCURRENCY)) failedCountries.push({ country: cc, error: why });
+      console.warn(`  [GDELT] conflict sweep backed off (${why}) after ${i + batch.length}/${CONFLICT_COUNTRIES.length} countries`);
+      break;
+    }
     if (i + CONCURRENCY < CONFLICT_COUNTRIES.length) await pace(500); // inter-batch only; no trailing wait
   }
-  if (successfulCountries < GDELT_MIN_SUCCESSFUL_COUNTRIES) {
+  if (successfulCountries < GDELT_MIN_SUCCESSFUL_COUNTRIES || events.length === 0) {
     const sample = failedCountries.slice(0, 6).map(({ country, error }) => `${country}:${error}`).join(', ');
-    throw new Error(
-      `GDELT conflict-events coverage below floor: ${successfulCountries}/${CONFLICT_COUNTRIES.length} countries succeeded ` +
-      `(min ${GDELT_MIN_SUCCESSFUL_COUNTRIES})${sample ? `; failures: ${sample}` : ''}`,
-    );
+    const docFailure = successfulCountries < GDELT_MIN_SUCCESSFUL_COUNTRIES
+      ? `GDELT conflict-events coverage below floor: ${successfulCountries}/${CONFLICT_COUNTRIES.length} countries succeeded ` +
+        `(min ${GDELT_MIN_SUCCESSFUL_COUNTRIES})${sample ? `; failures: ${sample}` : ''}`
+      : `GDELT conflict-events returned zero events across ${successfulCountries}/${CONFLICT_COUNTRIES.length} successful countries`;
+    console.warn(`  ${docFailure}; trying official bulk event export`);
+    try {
+      const bulk = await fetchBulkEvents();
+      if (!bulk?.events?.length) throw new Error('latest export contained no priority-country material-conflict events');
+      let previousSnapshot = null;
+      try {
+        previousSnapshot = await loadPreviousSnapshot();
+      } catch (snapshotError) {
+        console.warn(
+          '  GDELT bulk previous snapshot unavailable; publishing current exports only:'
+          + ` ${snapshotError?.message || snapshotError}`,
+        );
+      }
+      const rolling = mergeGdeltBulkRollingWindow(bulk, previousSnapshot, now());
+      if (!rolling.events.length) throw new Error('rolling bulk window contained no priority-country material-conflict events');
+      console.log(
+        `  GDELT bulk conflict-events fallback: ${rolling.events.length} events through export ${bulk.exportTimestamp}`
+        + ` (${rolling.retainedPreviousEvents} retained from prior runs)`,
+      );
+      return {
+        events: rolling.events,
+        pagination: {
+          countriesTotal: CONFLICT_COUNTRIES.length,
+          countriesSucceeded: successfulCountries,
+          countriesFailed: failedCountries.length,
+          minSuccessfulCountries: GDELT_MIN_SUCCESSFUL_COUNTRIES,
+          exportTimestamp: bulk.exportTimestamp,
+          exportsRequested: bulk.exportsRequested,
+          exportsSucceeded: bulk.exportsSucceeded,
+          countriesWithEvents: new Set(rolling.events.map(event => event.country)).size,
+          rollingWindowHours: GDELT_ROLLING_WINDOW_MS / (60 * 60 * 1000),
+          rollingWindowStartedAt: rolling.rollingWindowStartedAt,
+          rollingWindowComplete: rolling.rollingWindowComplete,
+          retainedPreviousEvents: rolling.retainedPreviousEvents,
+        },
+        source: 'gdelt-bulk',
+      };
+    } catch (bulkError) {
+      throw new Error(`${docFailure}; bulk fallback failed: ${bulkError?.message || bulkError}`);
+    }
   }
   console.log(`  GDELT conflict-events (ACLED fallback): ${events.length} events across ${successfulCountries}/${CONFLICT_COUNTRIES.length} successful country fetches`);
   return {
@@ -421,7 +496,10 @@ async function fetchGdeltTensions() {
 
 // ─── Main ───
 
-async function fetchAll() {
+// runSeed invokes this as `fetchFn()` with no arguments, so the injected dep is for tests
+// only — the GDELT fallback reaches its proxy through a `curl` child process, which no
+// global-fetch stub can intercept, so it must be injectable to keep tests hermetic.
+export async function fetchAll({ fetchGdeltFallback = fetchGdeltConflictEvents } = {}) {
   // #5140: anchor the GDELT-fallback sweep cutoff at the START of the fetch phase,
   // not at sweep entry — the aux feeds below (HAPI is sequential, ~306s worst) and
   // the sweep share runSeed's single fetch deadline, so time the aux stage burns
@@ -481,13 +559,24 @@ async function fetchAll() {
       // on the no-creds path: a credentialed-but-failed fetch still throws below, and a
       // credentialed-but-empty ACLED result is trusted (returns `ac`) rather than
       // overwritten by GDELT volume.
-      const gdeltEvents = await fetchGdeltConflictEvents({ deadlineAt: sweepDeadlineAt }).catch((e) => {
+      const gdeltEvents = await fetchGdeltFallback({ deadlineAt: sweepDeadlineAt }).catch((e) => {
         console.warn(`  GDELT conflict-events fallback failed: ${e.message}`);
         return null;
       });
       if (gdeltEvents?.events?.length) return gdeltEvents;
-      console.log('  ACLED: no credentials + GDELT fallback empty — publishing auxiliary feeds only, primary feed left empty');
-      return { events: [], pagination: undefined };
+      // #5256: we have NO usable primary source this tick — ACLED is unconfigured and the
+      // only fallback errored (fetchGdeltConflictEvents throws on floor-miss/zero/bulk
+      // failure; it never resolves to a legitimate empty). Say so explicitly.
+      //
+      // Returning a bare `{ events: [] }` here laundered an upstream OUTAGE into a
+      // "0 records" result, which runSeed reads as contract RETRY -> and once the
+      // last-good keys had expired, #5258's guard exited 1. With no source configured no
+      // retry can ever fix that, so it crash-looped every tick forever while /api/health
+      // already reported acledIntel EMPTY. sourceUnavailable tells runSeed to publish
+      // nothing (an empty envelope would wipe last-good the moment GDELT merely blips)
+      // and exit 0, leaving the data alarm to health where it belongs.
+      console.warn('  ACLED: no credentials + GDELT fallback unavailable — no usable conflict source; publishing auxiliary feeds only, primary feed left untouched (health reports acledIntel EMPTY)');
+      return { events: [], pagination: undefined, sourceUnavailable: true };
     }
     const reason = acled.reason?.message || acled.reason;
     const err = new Error(

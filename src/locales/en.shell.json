@@ -391,7 +391,8 @@
       "recentEarthquakes": "{{count}} recent earthquakes",
       "stockIndex": "Stock index: {{value}}",
       "activeStrikes": "{{count}} active strikes detected"
-    }
+    },
+    "china": { "title": "China Country Snapshot", "description": "Current macro, market, trade, energy, and operational availability from existing public data contracts.", "macroPolicy": "Macro & Policy", "marketCredit": "Market & Credit", "tradeSupply": "Trade & Supply Chain", "energy": "Energy", "availability": "Hazards & Aviation", "observed": "As of:", "source": "Source:", "imfGrowth": "IMF growth forecast", "creditGdp": "Credit to GDP", "strategicTrade": "Strategic trade exposure", "crudeImports": "Crude oil imports", "gasDemand": "Gas demand", "energyMix": "Power mix", "coal": "coal", "aviationAvailability": "Aviation availability", "hazardAvailability": "Hazard availability", "noMajorDisruptions": "No major disruptions reported", "activeDisruptions_one": "{{count}} active disruption", "activeDisruptions_other": "{{count}} active disruptions", "activeSignals_one": "{{count}} active signal", "activeSignals_other": "{{count}} active signals", "aviationSource": "Aviation monitoring", "hazardSource": "Country intelligence signals", "marketSource": "Country market index", "ccfiSource": "Shanghai Shipping Exchange", "comtradeSource": "UN Comtrade reporter 156", "sourceUnavailable": "Source unavailable", "macroUnavailable": "Macro and policy data are currently unavailable.", "marketUnavailable": "Market and credit data are currently unavailable.", "tradeUnavailable": "Trade and supply-chain data are currently unavailable.", "energyUnavailable": "Energy data are currently unavailable.", "availabilityUnavailable": "Hazard and aviation availability data are currently unavailable.", "status": { "loading": "Loading", "available": "Available", "partial": "Partial", "stale": "Stale", "unavailable": "Unavailable" } }
   },
   "contextMenu": {
     "openCountryBrief": "Open Country Brief",
@@ -499,7 +500,7 @@
       "infoTooltip": "<strong>Daily Market Brief</strong> AI-generated daily summary of global market conditions, key macro trends, and sector-level signals — refreshes each trading day."
     },
     "defensePatents": {
-      "infoTooltip": "Weekly defense and dual-use patent filings by Raytheon, Lockheed, Huawei, DARPA, and other strategic organizations. Categories: H04B (comms), H01L (semiconductors), F42B (ammunition), G06N (AI), C12N (biotech). Source: USPTO PatentsView.",
+      "infoTooltip": "Weekly defense and dual-use patent filings by Raytheon, Lockheed, Huawei, DARPA, and other strategic organizations. Categories: H04B (comms), H01L (semiconductors), F42B (ammunition), G06N (AI), C12N (biotech). Source: USPTO Open Data Portal.",
       "title": "R&D Signal"
     },
     "defiTokens": {
@@ -599,7 +600,7 @@
       "infoTooltip": "<strong>BTC Regime</strong> Composite signal dashboard for Bitcoin positioning and risk appetite:<ul><li><strong>Liquidity</strong>: Net Fed liquidity proxy</li><li><strong>Flow</strong>: BTC vs QQQ 5-day returns</li><li><strong>Regime</strong>: QQQ vs XLP rotation (risk-on/off)</li><li><strong>BTC Trend</strong>: Price vs SMA50/200, Mayer Multiple</li><li><strong>Hash Rate</strong>: 30-day network hash change</li><li><strong>Fear & Greed</strong>: Market sentiment index</li></ul>This panel is for regime and positioning, not broad macro data."
     },
     "macroTiles": {
-      "infoTooltip": "<strong>Macro Indicators</strong> Key macroeconomic indicators for the US and Euro Area: CPI, unemployment, GDP, and central bank rates. Values shown with prior period delta. Source: FRED (Federal Reserve Economic Data)."
+      "infoTooltip": "<strong>Macro Indicators</strong> Key macroeconomic indicators for the US, Euro Area, and China. China appears only when current price, activity, policy, and FX coverage passes the launch gate; each China tile keeps its source and observation date visible. Sources: FRED, Eurostat, ECB, OECD, BIS, and HKMA."
     },
     "marketImplications": {
       "infoTooltip": "<strong>AI Market Implications</strong> LLM-generated trade signals derived from live geopolitical, commodity, and macro state after each forecast cycle.<ul><li><strong>Direction</strong>: LONG / SHORT / HEDGE with confidence rating</li><li><strong>Timeframe</strong>: 1W, 2W, 1M, or 3M horizon</li><li><strong>Driver</strong>: Key catalyst behind the signal</li><li><strong>Risk</strong>: Caveat or invalidation condition</li></ul><em>For informational purposes only. Not investment advice.</em>",

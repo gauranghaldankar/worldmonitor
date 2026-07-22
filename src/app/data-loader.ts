@@ -89,7 +89,7 @@ import { fetchSatelliteTLEs, initSatRecs, propagatePositions, startPropagationLo
 import type { SatRecEntry } from '@/services/satellites';
 import { dataFreshness, type DataSourceId } from '@/services/data-freshness';
 import type { CorrelationSignal } from '@/services/correlation';
-import { fetchConflictEvents, fetchUcdpClassifications, fetchHapiSummary, fetchUcdpEvents, deduplicateAgainstAcled, fetchIranEvents } from '@/services/conflict';
+import { fetchConflictEvents, fetchUcdpClassifications, fetchHapiSummary, fetchUcdpEvents, deduplicateAgainstAcled, deduplicateUcdpProjectionAggregates, fetchIranEvents } from '@/services/conflict';
 import { fetchUnhcrPopulation } from '@/services/displacement';
 import { fetchClimateAnomalies } from '@/services/climate';
 import { fetchSecurityAdvisories } from '@/services/security-advisories';
@@ -107,6 +107,7 @@ import { isDesktopRuntime, toApiUrl } from '@/services/runtime';
 import { getAiFlowSettings } from '@/services/ai-flow-settings';
 import { t, getCurrentLanguage } from '@/services/i18n';
 import { getHydratedData } from '@/services/bootstrap';
+import { publicRpcFetch } from '@/services/public-rpc-fetch';
 import type { ListFeedDigestResponse } from '@/generated/client/worldmonitor/news/v1/service_client';
 import type { GetSectorSummaryResponse, ListMarketQuotesResponse, ListCommodityQuotesResponse } from '@/generated/client/worldmonitor/market/v1/service_client';
 import type {
@@ -131,6 +132,8 @@ import type { ThreatTimelinePanel } from '@/components/ThreatTimelinePanel';
 import type { InternetDisruptionsPanel } from '@/components/InternetDisruptionsPanel';
 import type { StrategicPosturePanel } from '@/components/StrategicPosturePanel';
 import type { EconomicPanel } from '@/components/EconomicPanel';
+import type { GlobalProcurementPanel } from '@/components/GlobalProcurementPanel';
+import type { GlobalTenderFilters } from '@/services/global-tenders';
 import type { EnergyComplexPanel } from '@/components/EnergyComplexPanel';
 import type { TechReadinessPanel } from '@/components/TechReadinessPanel';
 import type { UcdpEventsPanel } from '@/components/UcdpEventsPanel';
@@ -387,6 +390,8 @@ export class DataLoaderManager implements AppModule {
   private satellitePropagationCleanup: (() => void) | null = null;
   private dailyBriefGeneration = 0;
   private _stockAnalysisGeneration = 0;
+  private globalTenderGeneration = 0;
+  private globalTenderFilters: GlobalTenderFilters = {};
   private dailyBriefFrameworkUnsubscribe: (() => void) | null = null;
   private marketImplicationsFrameworkUnsubscribe: (() => void) | null = null;
   private cachedSatRecs: SatRecEntry[] | null = null;
@@ -618,9 +623,9 @@ export class DataLoaderManager implements AppModule {
 
     try {
       markLcpDebug('wm:data:feed-digest-start');
-      const resp = await fetch(
+      const resp = await publicRpcFetch(
         toApiUrl(`/api/news/v1/list-feed-digest?variant=${SITE_VARIANT}&lang=${getCurrentLanguage()}`),
-        { cache: 'no-cache', signal: AbortSignal.timeout(this.digestRequestTimeoutMs) },
+        { signal: AbortSignal.timeout(this.digestRequestTimeoutMs) },
       );
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = await resp.json() as ListFeedDigestResponse;
@@ -773,6 +778,9 @@ export class DataLoaderManager implements AppModule {
         tasks.push({ name: 'spending', task: () => runGuarded('spending', () => this.loadGovernmentSpending()) });
         tasks.push({ name: 'bis', task: () => runGuarded('bis', () => this.loadBisData()) });
         tasks.push({ name: 'bls', task: () => runGuarded('bls', () => this.loadBlsData()) });
+      }
+      if (hasPremiumAccess() && shouldLoad('global-procurement')) {
+        tasks.push({ name: 'global-tenders', task: () => runGuarded('global-tenders', () => this.loadGlobalTenders()) });
       }
       if (shouldLoad('energy-complex')) {
         tasks.push({ name: 'oil', task: () => runGuarded('oil', () => this.loadOilAnalytics()) });
@@ -2530,7 +2538,7 @@ export class DataLoaderManager implements AppModule {
       }
     })());
 
-    const hydratedUcdp = getHydratedData('ucdpEvents') as import('@/generated/client/worldmonitor/conflict/v1/service_client').ListUcdpEventsResponse | undefined;
+    const hydratedUcdp = getHydratedData('ucdpEvents') as import('@/services/conflict').HydratedUcdpPayload | undefined;
 
     tasks.push((async () => {
       try {
@@ -2616,7 +2624,13 @@ export class DataLoaderManager implements AppModule {
     tasks.push((async () => {
       try {
         const protestEvents = await protestsTask;
-        const result = await fetchUcdpEvents(hydratedUcdp);
+        // The bootstrap payload is a dashboard projection (#5300) — 150 rows, not
+        // 2,000. The panel is fine with that (it renders 50/tab and takes its
+        // counts from the precomputed aggregates), but the map draws every event.
+        // When its layer is on, skip hydration so fetchUcdpEvents goes to the RPC
+        // and returns the full set.
+        const wantsFullUcdpSet = this.ctx.mapLayers.ucdpEvents;
+        const result = await fetchUcdpEvents(wantsFullUcdpSet ? undefined : hydratedUcdp);
         if (!result.success) {
           // listUcdpEvents is a pure Redis-read (gold standard). Retrying returns
           // the same empty result until the Railway seed refreshes the key.
@@ -2628,7 +2642,13 @@ export class DataLoaderManager implements AppModule {
           latitude: e.lat, longitude: e.lon, event_date: e.time.toISOString(), fatalities: e.fatalities ?? 0,
         }));
         const events = deduplicateAgainstAcled(result.data, acledEvents);
-        (this.ctx.panels['ucdp-events'] as UcdpEventsPanel)?.setEvents(events);
+        const aggregates = !wantsFullUcdpSet && hydratedUcdp?.aggregates && hydratedUcdp.dedupeIndex
+          ? deduplicateUcdpProjectionAggregates(hydratedUcdp.aggregates, hydratedUcdp.dedupeIndex, acledEvents)
+          : undefined;
+        (this.ctx.panels['ucdp-events'] as UcdpEventsPanel)?.setEvents(
+          events,
+          aggregates,
+        );
         if (this.ctx.mapLayers.ucdpEvents) {
           this.ctx.map?.setUcdpEvents(events);
         }
@@ -3318,6 +3338,49 @@ export class DataLoaderManager implements AppModule {
       this.ctx.statusPanel?.updateApi('USASpending', { status: 'error' });
       dataFreshness.recordError('spending', String(e));
     }
+  }
+
+  async loadGlobalTenders(filters?: GlobalTenderFilters, append = false): Promise<void> {
+    const procurementPanel = this.ctx.panels['global-procurement'] as GlobalProcurementPanel | undefined;
+    if (!procurementPanel) return;
+    const requestGeneration = ++this.globalTenderGeneration;
+    const requestFilters = filters ?? this.globalTenderFilters;
+    this.globalTenderFilters = { ...requestFilters, cursor: '' };
+    procurementPanel.setRequestHandler((nextFilters, shouldAppend) => {
+      void this.loadGlobalTenders(nextFilters, shouldAppend);
+    });
+    if (!hasPremiumAccess()) {
+      procurementPanel?.clear();
+      return;
+    }
+    procurementPanel.setLoading(true, append);
+    try {
+      const { fetchGlobalTenders } = await import('@/services/global-tenders');
+      const data = await fetchGlobalTenders(requestFilters);
+      if (requestGeneration !== this.globalTenderGeneration) return;
+      if (!hasPremiumAccess()) {
+        procurementPanel.clear();
+        return;
+      }
+      procurementPanel.update(data, append);
+      this.ctx.statusPanel?.updateApi('Global Procurement', {
+        status: !data.dataAvailable ? 'error' : ['partial', 'stale'].includes(data.availability) ? 'warning' : 'ok',
+      });
+    } catch (error) {
+      if (requestGeneration !== this.globalTenderGeneration || !hasPremiumAccess()) return;
+      console.warn('[App] Global tenders failed:', error);
+      procurementPanel.showUnavailable();
+      this.ctx.statusPanel?.updateApi('Global Procurement', { status: 'error' });
+    }
+  }
+
+  async clearGlobalTenders(): Promise<void> {
+    this.globalTenderGeneration += 1;
+    this.globalTenderFilters = {};
+    const procurementPanel = this.ctx.panels['global-procurement'] as GlobalProcurementPanel | undefined;
+    procurementPanel?.clear();
+    const { clearGlobalTenderCache } = await import('@/services/global-tenders');
+    clearGlobalTenderCache();
   }
 
   async loadBisData(): Promise<void> {

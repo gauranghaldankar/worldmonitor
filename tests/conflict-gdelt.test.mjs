@@ -12,6 +12,8 @@ import {
   GDELT_MIN_SUCCESSFUL_COUNTRIES,
 } from '../scripts/seed-conflict-intel.mjs';
 
+const BULK_FIXTURE_NOW = Date.parse('2026-07-13T12:00:00Z');
+
 test('gdeltSeenDateToIso parses GDELT seendate formats to YYYY-MM-DD', () => {
   assert.equal(gdeltSeenDateToIso('20260709T140000Z'), '2026-07-09');
   assert.equal(gdeltSeenDateToIso('20260709140000'), '2026-07-09');
@@ -86,6 +88,7 @@ test('fetchGdeltConflictEvents fails closed when too many country fetches fail',
   await assert.rejects(
     fetchGdeltConflictEvents({
       pace: async () => {},
+      fetchBulkEvents: async () => { throw new Error('bulk unavailable'); },
       fetchCountryEvents: async (cc) => {
         calls += 1;
         if (calls < GDELT_MIN_SUCCESSFUL_COUNTRIES) {
@@ -98,15 +101,162 @@ test('fetchGdeltConflictEvents fails closed when too many country fetches fail',
   );
 });
 
-test('fetchGdeltConflictEvents treats successful zero-article countries as coverage', async () => {
+test('fetchGdeltConflictEvents falls through to bulk when the DOC sweep succeeds but yields zero events', async () => {
   const result = await fetchGdeltConflictEvents({
     pace: async () => {},
+    now: () => BULK_FIXTURE_NOW,
+    loadPreviousSnapshot: async () => null,
     fetchCountryEvents: async (cc) => ({ country: cc, ok: true, events: [] }),
+    fetchBulkEvents: async () => ({
+      events: [{ id: 'gdelt-event-empty-doc', country: 'Sudan' }],
+      exportTimestamp: '20260713110000',
+      exportsRequested: 8,
+      exportsSucceeded: 8,
+    }),
   });
 
-  assert.equal(result.events.length, 0);
+  assert.equal(result.source, 'gdelt-bulk');
+  assert.equal(result.events.length, 1);
   assert.equal(result.pagination.countriesSucceeded, 20);
   assert.equal(result.pagination.countriesFailed, 0);
+});
+
+test('fetchGdeltConflictEvents recovers from a throttled DOC sweep with the bulk event feed', async () => {
+  const result = await fetchGdeltConflictEvents({
+    pace: async () => {},
+    now: () => BULK_FIXTURE_NOW,
+    loadPreviousSnapshot: async () => null,
+    fetchCountryEvents: async (cc) => ({
+      country: cc,
+      ok: false,
+      events: [],
+      error: 'HTTP 429',
+    }),
+    fetchBulkEvents: async () => ({
+      events: [{
+        id: 'gdelt-event-1',
+        country: 'Sudan',
+        event_date: '2026-07-13',
+        occurredAt: Date.parse('2026-07-13'),
+        source: 'example.com',
+        url: 'https://example.com/conflict',
+      }],
+      exportTimestamp: '20260713110000',
+      exportsRequested: 8,
+      exportsSucceeded: 8,
+    }),
+  });
+
+  assert.equal(result.source, 'gdelt-bulk');
+  assert.equal(result.events.length, 1);
+  assert.equal(result.events[0].country, 'Sudan');
+  assert.equal(result.pagination.countriesTotal, Object.keys(GDELT_COUNTRY_NAMES).length);
+  assert.equal(result.pagination.countriesSucceeded, 0);
+  assert.equal(result.pagination.countriesFailed, Object.keys(GDELT_COUNTRY_NAMES).length);
+  assert.equal(result.pagination.exportTimestamp, '20260713110000');
+  assert.equal(result.pagination.exportsRequested, 8);
+  assert.equal(result.pagination.exportsSucceeded, 8);
+  assert.equal(result.pagination.countriesWithEvents, 1);
+});
+
+test('fetchGdeltConflictEvents carries prior bulk events through the EMA 24h window', async () => {
+  const now = Date.parse('2026-07-13T18:00:00Z');
+  const makeEvent = (id, hoursAgo) => {
+    const gdeltAddedAt = now - hoursAgo * 60 * 60 * 1000;
+    return {
+      id,
+      country: 'Sudan',
+      event_date: new Date(gdeltAddedAt).toISOString().slice(0, 10),
+      occurredAt: gdeltAddedAt,
+      gdeltAddedAt,
+      source: 'example.com',
+      url: `https://example.com/${id}`,
+    };
+  };
+  const result = await fetchGdeltConflictEvents({
+    pace: async () => {},
+    now: () => now,
+    fetchCountryEvents: async (cc) => ({ country: cc, ok: false, events: [], error: 'HTTP 429' }),
+    fetchBulkEvents: async () => ({
+      events: [makeEvent('current-1h', 1)],
+      oldestExportTimestamp: '20260713160000',
+      exportTimestamp: '20260713170000',
+      exportsRequested: 8,
+      exportsSucceeded: 8,
+    }),
+    loadPreviousSnapshot: async () => ({
+      source: 'gdelt-bulk',
+      events: [makeEvent('prior-12h', 12), makeEvent('stale-25h', 25)],
+      pagination: {
+        exportTimestamp: '20260713153000',
+        rollingWindowStartedAt: now - 14 * 60 * 60 * 1000,
+      },
+    }),
+  });
+
+  assert.deepEqual(result.events.map(event => event.id), ['current-1h', 'prior-12h']);
+  assert.equal(result.pagination.rollingWindowHours, 24);
+  assert.equal(result.pagination.retainedPreviousEvents, 1);
+  const windows = computeEmaWindows(new Map(), result.events, [], now);
+  assert.equal(windows.get('sudan').window.at(-1), 2);
+});
+
+test('fetchGdeltConflictEvents publishes fresh bulk events when the previous snapshot read fails', async () => {
+  const now = Date.parse('2026-07-13T18:00:00Z');
+  const result = await fetchGdeltConflictEvents({
+    pace: async () => {},
+    now: () => now,
+    fetchCountryEvents: async (cc) => ({ country: cc, ok: false, events: [], error: 'HTTP 429' }),
+    fetchBulkEvents: async () => ({
+      events: [{
+        id: 'fresh-after-redis-blip',
+        country: 'Sudan',
+        event_date: '2026-07-13',
+        occurredAt: now - 60 * 60 * 1000,
+        gdeltAddedAt: now - 60 * 60 * 1000,
+      }],
+      oldestExportTimestamp: '20260713160000',
+      exportTimestamp: '20260713170000',
+      exportsRequested: 8,
+      exportsSucceeded: 8,
+    }),
+    loadPreviousSnapshot: async () => {
+      throw new Error('Redis snapshot read failed: HTTP 503');
+    },
+  });
+
+  assert.equal(result.source, 'gdelt-bulk');
+  assert.deepEqual(result.events.map(event => event.id), ['fresh-after-redis-blip']);
+  assert.equal(result.pagination.retainedPreviousEvents, 0);
+  assert.equal(result.pagination.rollingWindowComplete, false);
+});
+
+test('fetchGdeltConflictEvents preserves partial DOC coverage telemetry after bulk recovery', async () => {
+  let calls = 0;
+  const result = await fetchGdeltConflictEvents({
+    pace: async () => {},
+    now: () => BULK_FIXTURE_NOW,
+    loadPreviousSnapshot: async () => null,
+    fetchCountryEvents: async (cc) => {
+      calls += 1;
+      return calls <= GDELT_MIN_SUCCESSFUL_COUNTRIES
+        ? { country: cc, ok: true, events: [] }
+        : { country: cc, ok: false, events: [], error: 'HTTP 429' };
+    },
+    fetchBulkEvents: async () => ({
+      events: [{ id: 'gdelt-event-partial-doc', country: 'Sudan' }],
+      exportTimestamp: '20260713110000',
+      exportsRequested: 8,
+      exportsSucceeded: 8,
+    }),
+  });
+
+  assert.equal(result.source, 'gdelt-bulk');
+  assert.equal(result.pagination.countriesSucceeded, GDELT_MIN_SUCCESSFUL_COUNTRIES);
+  assert.equal(
+    result.pagination.countriesFailed,
+    Object.keys(GDELT_COUNTRY_NAMES).length - GDELT_MIN_SUCCESSFUL_COUNTRIES,
+  );
 });
 
 // #5140: the sweep's worst case (20 countries × direct+proxy retries ÷ 4
@@ -123,6 +273,7 @@ test('fetchGdeltConflictEvents stops launching batches once the launch cutoff pa
       pace: async () => {},
       now: () => fakeTime,
       deadlineAt: 75_000,
+      fetchBulkEvents: async () => { throw new Error('bulk unavailable'); },
       fetchCountryEvents: async (cc) => {
         calls += 1;
         // Each batch of 4 consumes 40s of fake wall clock — a degraded-GDELT batch.
@@ -146,6 +297,7 @@ test('fetchGdeltConflictEvents launches nothing when the phase cutoff already pa
     fetchGdeltConflictEvents({
       pace: async () => {},
       deadlineAt: Date.now() - 1,
+      fetchBulkEvents: async () => { throw new Error('bulk unavailable'); },
       fetchCountryEvents: async (cc) => {
         calls += 1;
         return { country: cc, ok: true, events: [] };
@@ -161,6 +313,7 @@ test('fetchGdeltConflictEvents stops sweeping once the coverage floor is unreach
   await assert.rejects(
     fetchGdeltConflictEvents({
       pace: async () => {},
+      fetchBulkEvents: async () => { throw new Error('bulk unavailable'); },
       fetchCountryEvents: async (cc) => {
         calls += 1;
         return { country: cc, ok: false, events: [], error: 'proxy unavailable' };
@@ -182,6 +335,7 @@ test('early-stop reason names BOTH conditions when budget and floor trip togethe
       pace: async () => {},
       now: () => fakeTime,
       deadlineAt: 115_000,
+      fetchBulkEvents: async () => { throw new Error('bulk unavailable'); },
       fetchCountryEvents: async (cc) => {
         calls += 1;
         fakeTime += 10_000;

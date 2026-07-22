@@ -142,6 +142,62 @@ export interface MacroMeta {
   qqqSparkline: number[];
 }
 
+export interface GetChinaMacroSnapshotRequest {
+}
+
+export interface GetChinaMacroSnapshotResponse {
+  countryCode: string;
+  generatedAt: string;
+  status: string;
+  launchReady: boolean;
+  contentObservationDate: string;
+  latestObservationDate: string;
+  indicators: ChinaMacroIndicator[];
+  sourceDecisions: ChinaMacroSourceDecision[];
+  releaseEvents: ChinaReleaseEvent[];
+  unavailable: boolean;
+}
+
+export interface ChinaMacroIndicator {
+  id: string;
+  label: string;
+  category: string;
+  value: number;
+  hasValue: boolean;
+  priorValue: number;
+  hasPriorValue: boolean;
+  unit: string;
+  observationDate: string;
+  source: string;
+  sourceUrl: string;
+  stale: boolean;
+  unavailableReason: string;
+  contextOnly: boolean;
+}
+
+export interface ChinaMacroSourceDecision {
+  source: string;
+  host: string;
+  status: string;
+  reason: string;
+  checkedAt: string;
+  optional: boolean;
+  requestCount: number;
+}
+
+export interface ChinaReleaseEvent {
+  id: string;
+  event: string;
+  countryCode: string;
+  releaseDate: string;
+  releaseTime: string;
+  timezone: string;
+  kind: string;
+  status: string;
+  source: string;
+  sourceUrl: string;
+}
+
 export interface GetEnergyCapacityRequest {
   energySources: string[];
   years: number;
@@ -691,6 +747,87 @@ export interface EnergyCrisisPolicy {
   status: string;
 }
 
+export interface ListGlobalTendersRequest {
+  country: string;
+  countries: string[];
+  region: string;
+  source: string;
+  status: string;
+  deadlineFrom: string;
+  deadlineTo: string;
+  minValue: number;
+  maxValue: number;
+  currency: string;
+  category: string;
+  query: string;
+  pageSize: number;
+  cursor: string;
+  sort: string;
+  buyer: string;
+  publishedFrom: string;
+  publishedTo: string;
+  minAutomationScore: number;
+}
+
+export interface ListGlobalTendersResponse {
+  tenders: GlobalTender[];
+  nextCursor: string;
+  fetchedAt: string;
+  dataAvailable: boolean;
+  availability: string;
+  sourceStatuses: TenderSourceStatus[];
+  total: number;
+  appliedFilters: string[];
+  countryCoverage: string;
+}
+
+export interface GlobalTender {
+  id: string;
+  source: string;
+  sourceNoticeId: string;
+  officialUrl: string;
+  countryCode?: string;
+  region?: string;
+  title: string;
+  description?: string;
+  buyer?: string;
+  publishedAt?: string;
+  updatedAt?: string;
+  deadline?: string;
+  status: string;
+  noticeType?: string;
+  money?: TenderMoney;
+  categoryCodes: string[];
+  sectors: string[];
+  eligibilityRequirements: string[];
+  submissionUrls: string[];
+  participationMode: string;
+  automationFit?: AutomationFit;
+}
+
+export interface TenderMoney {
+  amount?: number;
+  currency?: string;
+}
+
+export interface AutomationFit {
+  level: string;
+  score: number;
+  classificationVersion: string;
+  matchReasons: string[];
+  evidence: string[];
+}
+
+export interface TenderSourceStatus {
+  source: string;
+  state: string;
+  recordCount: number;
+  fetchedAt: string;
+  error?: string;
+  lastSuccessfulAt: string;
+  stale: boolean;
+}
+
 export interface FieldViolation {
   field: string;
   description: string;
@@ -840,6 +977,29 @@ export class EconomicServiceClient {
     }
 
     return await resp.json() as GetMacroSignalsResponse;
+  }
+
+  async getChinaMacroSnapshot(_req: GetChinaMacroSnapshotRequest, options?: EconomicServiceCallOptions): Promise<GetChinaMacroSnapshotResponse> {
+    let path = "/api/economic/v1/get-china-macro-snapshot";
+    const url = this.baseURL + path;
+
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...this.defaultHeaders,
+      ...options?.headers,
+    };
+
+    const resp = await this.fetchFn(url, {
+      method: "GET",
+      headers,
+      signal: options?.signal,
+    });
+
+    if (!resp.ok) {
+      return this.handleError(resp);
+    }
+
+    return await resp.json() as GetChinaMacroSnapshotResponse;
   }
 
   async getEnergyCapacity(req: GetEnergyCapacityRequest, options?: EconomicServiceCallOptions): Promise<GetEnergyCapacityResponse> {
@@ -1382,6 +1542,49 @@ export class EconomicServiceClient {
     }
 
     return await resp.json() as GetEnergyCrisisPoliciesResponse;
+  }
+
+  async listGlobalTenders(req: ListGlobalTendersRequest, options?: EconomicServiceCallOptions): Promise<ListGlobalTendersResponse> {
+    let path = "/api/economic/v1/list-global-tenders";
+    const params = new URLSearchParams();
+    if (req.country != null && req.country !== "") params.set("country", String(req.country));
+    if (req.countries && req.countries.length > 0) req.countries.forEach(v => params.append("countries", v));
+    if (req.region != null && req.region !== "") params.set("region", String(req.region));
+    if (req.source != null && req.source !== "") params.set("source", String(req.source));
+    if (req.status != null && req.status !== "") params.set("status", String(req.status));
+    if (req.deadlineFrom != null && req.deadlineFrom !== "") params.set("deadline_from", String(req.deadlineFrom));
+    if (req.deadlineTo != null && req.deadlineTo !== "") params.set("deadline_to", String(req.deadlineTo));
+    if (req.minValue != null && req.minValue !== 0) params.set("min_value", String(req.minValue));
+    if (req.maxValue != null && req.maxValue !== 0) params.set("max_value", String(req.maxValue));
+    if (req.currency != null && req.currency !== "") params.set("currency", String(req.currency));
+    if (req.category != null && req.category !== "") params.set("category", String(req.category));
+    if (req.query != null && req.query !== "") params.set("query", String(req.query));
+    if (req.pageSize != null && req.pageSize !== 0) params.set("page_size", String(req.pageSize));
+    if (req.cursor != null && req.cursor !== "") params.set("cursor", String(req.cursor));
+    if (req.sort != null && req.sort !== "") params.set("sort", String(req.sort));
+    if (req.buyer != null && req.buyer !== "") params.set("buyer", String(req.buyer));
+    if (req.publishedFrom != null && req.publishedFrom !== "") params.set("published_from", String(req.publishedFrom));
+    if (req.publishedTo != null && req.publishedTo !== "") params.set("published_to", String(req.publishedTo));
+    if (req.minAutomationScore != null && req.minAutomationScore !== 0) params.set("min_automation_score", String(req.minAutomationScore));
+    const url = this.baseURL + path + (params.toString() ? "?" + params.toString() : "");
+
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...this.defaultHeaders,
+      ...options?.headers,
+    };
+
+    const resp = await this.fetchFn(url, {
+      method: "GET",
+      headers,
+      signal: options?.signal,
+    });
+
+    if (!resp.ok) {
+      return this.handleError(resp);
+    }
+
+    return await resp.json() as ListGlobalTendersResponse;
   }
 
   private async handleError(resp: Response): Promise<never> {

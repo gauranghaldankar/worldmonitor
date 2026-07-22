@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { ensureNoopenerRel, safeHtml } from '../src/utils/dom-utils.ts';
+import { h, ensureNoopenerRel, replaceChildren, safeHtml } from '../src/utils/dom-utils.ts';
+import { createBrowserEnvironment, MiniNode } from './helpers/mini-dom.mts';
 
 class TestElement {
   readonly nodeType = 1;
@@ -107,6 +108,124 @@ function withMinimalDom(fn: () => void): void {
     else globals.Node = originalNode;
   }
 }
+
+function withBrowserDom(fn: () => void): void {
+  const originalDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  const originalNode = Object.getOwnPropertyDescriptor(globalThis, 'Node');
+  const browser = createBrowserEnvironment();
+
+  Object.defineProperty(globalThis, 'document', {
+    configurable: true,
+    value: browser.document,
+  });
+  Object.defineProperty(globalThis, 'Node', {
+    configurable: true,
+    value: MiniNode,
+  });
+
+  try {
+    fn();
+  } finally {
+    if (originalDocument) Object.defineProperty(globalThis, 'document', originalDocument);
+    else delete (globalThis as { document?: unknown }).document;
+    if (originalNode) Object.defineProperty(globalThis, 'Node', originalNode);
+    else delete (globalThis as { Node?: unknown }).Node;
+  }
+}
+
+describe('dom-utils construction helpers', () => {
+  it('withBrowserDom exposes standard node-type contracts', () => {
+    withBrowserDom(() => {
+      const element = document.createElement('div');
+      const text = document.createTextNode('content');
+      const fragment = document.createDocumentFragment();
+
+      assert.equal(Node.ELEMENT_NODE, 1);
+      assert.equal(Node.TEXT_NODE, 3);
+      assert.equal(Node.DOCUMENT_FRAGMENT_NODE, 11);
+      assert.equal(element.nodeType, Node.ELEMENT_NODE);
+      assert.equal(text.nodeType, Node.TEXT_NODE);
+      assert.equal(fragment.nodeType, Node.DOCUMENT_FRAGMENT_NODE);
+    });
+  });
+
+  it('h applies attributes, datasets, and both supported style forms', () => {
+    withBrowserDom(() => {
+      const element = h('button', {
+        className: 'primary',
+        id: 'launch',
+        dataset: { role: 'action', active: 'true' },
+        style: { color: 'blue', display: 'none' },
+        'aria-label': 'Launch',
+        disabled: true,
+        ignored: null,
+      });
+      const stringStyled = h('span', { style: 'color: red;' });
+
+      assert.equal(element.className, 'primary');
+      assert.equal(element.id, 'launch');
+      assert.deepEqual(
+        { role: element.dataset.role, active: element.dataset.active },
+        { role: 'action', active: 'true' },
+      );
+      assert.deepEqual(
+        { color: element.style.color, display: element.style.display },
+        { color: 'blue', display: 'none' },
+      );
+      assert.equal(stringStyled.style.cssText, 'color: red;');
+      assert.equal(element.getAttribute('aria-label'), 'Launch');
+      assert.equal(element.hasAttribute('disabled'), true);
+      assert.equal(element.hasAttribute('ignored'), false);
+    });
+  });
+
+  it('h registers event handlers from on-prefixed props', () => {
+    withBrowserDom(() => {
+      let clicks = 0;
+      const button = h('button', { onClick: () => { clicks += 1; } });
+
+      button.dispatchEvent(new Event('click'));
+
+      assert.equal(clicks, 1);
+    });
+  });
+
+  it('h preserves node children, stringifies numbers, and skips empty children', () => {
+    withBrowserDom(() => {
+      const child = document.createElement('span');
+      const element = h(
+        'div',
+        'first',
+        child,
+        42,
+        null,
+        undefined,
+        false,
+        'last',
+      );
+
+      assert.equal(element.childNodes.length, 4);
+      assert.equal(element.childNodes[0]!.textContent, 'first');
+      assert.equal(element.childNodes[1], child);
+      assert.equal(element.childNodes[2]!.textContent, '42');
+      assert.equal(element.childNodes[3]!.textContent, 'last');
+    });
+  });
+
+  it('replaceChildren removes prior content before appending replacements', () => {
+    withBrowserDom(() => {
+      const element = h('div', null, 'old', h('span'));
+      const replacement = h('strong');
+
+      replaceChildren(element, replacement, 'new', 7);
+
+      assert.equal(element.childNodes.length, 3);
+      assert.equal(element.childNodes[0], replacement);
+      assert.equal(element.childNodes[1]!.textContent, 'new');
+      assert.equal(element.childNodes[2]!.textContent, '7');
+    });
+  });
+});
 
 describe('dom-utils safe link helpers', () => {
   it('adds noopener and noreferrer for blank-target links (#3550)', () => {

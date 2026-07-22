@@ -15,7 +15,6 @@ import {
   detectSupplyChainScenarios,
   detectPoliticalScenarios,
   detectMilitaryScenarios,
-  detectInfraScenarios,
   detectUcdpConflictZones,
   detectCyberScenarios,
   detectGpsJammingScenarios,
@@ -85,6 +84,7 @@ import {
   __setForecastLlmTransportForTests,
   __setForecastLlmRunDeadlineForTests,
 } from '../scripts/seed-forecasts.mjs';
+import { OPENROUTER_PROVIDER_ROUTING } from '../scripts/_llm-model-timeouts.mjs';
 import { CONFLICT_COUNT_SOURCE_FEED } from '../scripts/_forecast-resolution.mjs';
 
 const originalForecastEnv = {
@@ -473,36 +473,6 @@ describe('word-boundary term matching: no substring false positives (#4933)', ()
     assert.equal(pred.probability, 0.7);
   });
 
-  it('detectInfraScenarios: Somalia cyber threat does not boost a Mali outage', () => {
-    const preds = detectInfraScenarios({
-      outages: [{ country: 'Mali', severity: 'major' }],
-      cyberThreats: [{ country: 'Somalia', type: 'ddos' }],
-      gpsJamming: [],
-    });
-    assert.equal(preds.length, 1);
-    assert.equal(preds[0].probability, 0.4);
-    assert.deepEqual(preds[0].signals.map(s => s.type), ['outage']);
-  });
-
-  it('detectInfraScenarios: same-country cyber threat still boosts (positive control)', () => {
-    const preds = detectInfraScenarios({
-      outages: [{ country: 'Mali', severity: 'major' }],
-      cyberThreats: [{ country: 'Mali', type: 'ddos' }],
-      gpsJamming: [],
-    });
-    assert.equal(preds[0].probability, 0.55);
-    assert.ok(preds[0].signals.some(s => s.type === 'cyber'));
-  });
-
-  it('detectInfraScenarios: possessive form still matches across the boundary', () => {
-    const preds = detectInfraScenarios({
-      outages: [{ country: 'Mali', severity: 'major' }],
-      cyberThreats: [{ target: "Mali's banking sector", type: 'ddos' }],
-      gpsJamming: [],
-    });
-    assert.ok(preds[0].signals.some(s => s.type === 'cyber'));
-  });
-
   it('detectPoliticalScenarios: Nigeria protest anomaly does not boost a Niger forecast', () => {
     const preds = detectPoliticalScenarios({
       ciiScores: [{ code: 'NE', name: 'Niger', score: 70, level: 'high', trend: 'rising', components: { unrest: 60 } }],
@@ -814,10 +784,6 @@ describe('detector smoke tests: null/empty inputs', () => {
     assert.deepEqual(detectMilitaryScenarios({}), []);
   });
 
-  it('detectInfraScenarios({}) returns []', () => {
-    assert.deepEqual(detectInfraScenarios({}), []);
-  });
-
   it('detectors handle null arrays gracefully', () => {
     const inputs = {
       ciiScores: null,
@@ -836,7 +802,6 @@ describe('detector smoke tests: null/empty inputs', () => {
     assert.deepEqual(detectSupplyChainScenarios(inputs), []);
     assert.deepEqual(detectPoliticalScenarios(inputs), []);
     assert.deepEqual(detectMilitaryScenarios(inputs), []);
-    assert.deepEqual(detectInfraScenarios(inputs), []);
   });
 });
 
@@ -920,46 +885,6 @@ describe('detectMarketScenarios', () => {
       ciiScores: [],
     };
     assert.deepEqual(detectMarketScenarios(inputs), []);
-  });
-});
-
-describe('detectInfraScenarios', () => {
-  it('major outage produces infra prediction', () => {
-    const inputs = {
-      outages: [{ country: 'Syria', severity: 'major' }],
-      cyberThreats: [],
-      gpsJamming: [],
-    };
-    const result = detectInfraScenarios(inputs);
-    assert.ok(result.length >= 1);
-    assert.equal(result[0].domain, 'infrastructure');
-    assert.ok(result[0].title.includes('Syria'));
-  });
-
-  it('minor outage is ignored', () => {
-    const inputs = {
-      outages: [{ country: 'Test', severity: 'minor' }],
-      cyberThreats: [],
-      gpsJamming: [],
-    };
-    assert.deepEqual(detectInfraScenarios(inputs), []);
-  });
-
-  it('cyber threats boost probability', () => {
-    const base = {
-      outages: [{ country: 'Syria', severity: 'total' }],
-      cyberThreats: [],
-      gpsJamming: [],
-    };
-    const withCyber = {
-      outages: [{ country: 'Syria', severity: 'total' }],
-      cyberThreats: [{ country: 'Syria', type: 'ddos' }],
-      gpsJamming: [],
-    };
-    const baseResult = detectInfraScenarios(base);
-    const cyberResult = detectInfraScenarios(withCyber);
-    assert.ok(cyberResult[0].probability > baseResult[0].probability,
-      'cyber threats should boost probability');
   });
 });
 
@@ -1631,8 +1556,17 @@ describe('forecast llm overrides', () => {
     assert.deepEqual(options.providerOrder, ['openrouter', 'groq']);
     assert.equal(providers[0]?.name, 'openrouter');
     assert.equal(providers[0]?.model, 'deepseek/deepseek-v4-flash');
+    // Was 15_000: a 'stall cutoff' that treated the SYMPTOM of unrouted OpenRouter
+    // requests landing on slow backends. The cause is now fixed at the source (the
+    // openrouter entry carries OPENROUTER_PROVIDER_ROUTING, so calls go to the
+    // fastest non-China-hosted backend). Under that routing Flash completes at p90
+    // 22.4s, so a 15s cutoff did not prevent stalls — it GUARANTEED failure, and
+    // every market_implications run wrote a SEED_ERROR. Flash now gets a completion
+    // deadline that covers its measured distribution.
+    assert.equal(providers[0]?.timeout, 40_000, 'Flash gets its measured completion deadline under pinned routing');
     assert.equal(providers[1]?.name, 'groq');
     assert.equal(providers[1]?.model, 'llama-3.3-70b-versatile');
+    assert.equal(providers[1]?.timeout, 20_000, 'the fallback keeps its provider-specific window');
   });
 
   it('pins critical_signals to the pre-#4944 chain (probability-coupled stage)', () => {
@@ -1652,7 +1586,12 @@ describe('forecast llm overrides', () => {
     assert.equal(providers[0]?.model, 'llama-3.1-8b-instant');
     assert.equal(providers[1]?.name, 'openrouter');
     assert.equal(providers[1]?.model, 'google/gemini-2.5-flash');
-    assert.equal(providers[1]?.extraBody, undefined, 'pinned openrouter entry must keep the legacy request body (no reasoning field)');
+    assert.equal(providers[1]?.timeout, 25_000, 'the DeepSeek stall cutoff must not change the pinned Gemini fallback');
+    assert.deepEqual(
+      providers[1]?.extraBody,
+      { provider: OPENROUTER_PROVIDER_ROUTING },
+      'pinned OpenRouter fallback keeps the mandatory provider policy without adding a reasoning override',
+    );
   });
 
   it('lets ONLY the stage-scoped env override unpin critical_signals', () => {
@@ -1699,7 +1638,7 @@ describe('forecast llm overrides', () => {
 
     assert.equal(providers[0]?.model, 'llama-3.1-8b-instant');
     assert.equal(providers[1]?.model, 'google/gemini-2.5-flash');
-    assert.equal(providers[1]?.extraBody, undefined);
+    assert.deepEqual(providers[1]?.extraBody, { provider: OPENROUTER_PROVIDER_ROUTING });
 
     // The stage-scoped model env DOES reach the pinned fallback slot.
     process.env.FORECAST_LLM_CRITICAL_MODEL_OPENROUTER = 'google/gemini-2.5-pro';
@@ -1723,10 +1662,12 @@ describe('forecast llm overrides', () => {
     assert.equal(combinedProviders.length, 1);
     assert.equal(combinedProviders[0]?.name, 'openrouter');
     assert.equal(combinedProviders[0]?.model, 'google/gemini-2.5-pro');
+    assert.equal(combinedProviders[0]?.timeout, 25_000, 'model overrides outside DeepSeek Flash keep the original timeout');
 
     assert.deepEqual(scenarioOptions.providerOrder, ['openrouter', 'groq']);
     assert.equal(scenarioProviders[0]?.name, 'openrouter');
     assert.equal(scenarioProviders[0]?.model, 'deepseek/deepseek-v4-flash');
+    assert.equal(scenarioProviders[0]?.timeout, 40_000, 'Flash completion deadline (see above); non-Flash overrides keep 25s');
     assert.equal(scenarioProviders[1]?.model, 'llama-3.3-70b-versatile');
   });
 
@@ -1741,6 +1682,38 @@ describe('forecast llm overrides', () => {
     assert.equal(providers.length, 1);
     assert.equal(providers[0]?.name, 'openrouter');
     assert.equal(providers[0]?.model, 'google/gemini-2.5-flash-lite-preview');
+  });
+
+  it('falls through immediately after a DeepSeek Flash stall instead of retrying the hung provider', async () => {
+    process.env.GROQ_API_KEY = 'groq-test-key';
+    process.env.OPENROUTER_API_KEY = 'openrouter-test-key';
+    const calls = [];
+
+    __setForecastLlmTransportForTests({
+      fetch: async (url) => {
+        calls.push(String(url));
+        if (String(url).includes('openrouter.ai')) {
+          const error = new Error('The operation was aborted due to timeout');
+          error.name = 'TimeoutError';
+          throw error;
+        }
+        return {
+          ok: true,
+          status: 200,
+          headers: { get: () => null },
+          json: async () => ({
+            model: 'llama-3.3-70b-versatile',
+            choices: [{ message: { content: 'Groq fallback returned a complete narrative.' } }],
+          }),
+        };
+      },
+    });
+
+    const result = await __callForecastLlmForTests('system', 'user', { stage: 'scenario', retryDelayMs: 0 });
+
+    assert.equal(result?.provider, 'groq');
+    assert.equal(calls.filter((url) => url.includes('openrouter.ai')).length, 1);
+    assert.equal(calls.filter((url) => url.includes('api.groq.com')).length, 1);
   });
 
   it('retries a 429 Retry-After response on the same provider and returns groq', async () => {

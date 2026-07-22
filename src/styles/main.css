@@ -1660,6 +1660,47 @@ canvas,
   min-height: var(--dashboard-first-grid-reservation) !important;
 }
 
+/* #5332: eager always-full panels grow their grid row when populated content
+   replaces the loading state — rows are minmax(--dashboard-panel-row-min,
+   --dashboard-panel-row-max) sized from the panel's intrinsic content height,
+   so the growth shoves every row below (field: div.panel shift p75 0.244 on
+   9% of desktop views; the dominant remaining desktop CLS mechanism, #4580).
+   Pin the known always-full panels to the row max so their row lands at its
+   final height from first paint; .panel-content already scrolls. User-set
+   spans (.span-N) keep their own min-height reservation contract and are
+   excluded. Keep this key list in sync with the ranked offenders in #5332. */
+#panelsGrid > .panel[data-panel="threat-timeline"]:not(.span-2):not(.span-3):not(.span-4):not(.panel-wide):not(.resized),
+#panelsGrid > .panel[data-panel="gdelt-intel"]:not(.span-2):not(.span-3):not(.span-4):not(.panel-wide):not(.resized),
+#panelsGrid > .panel[data-panel="intel"]:not(.span-2):not(.span-3):not(.span-4):not(.panel-wide):not(.resized),
+#panelsGrid > .panel[data-panel="live-news"]:not(.span-2):not(.span-3):not(.span-4):not(.panel-wide):not(.resized),
+#panelsGrid > .panel[data-panel="politics"]:not(.span-2):not(.span-3):not(.span-4):not(.panel-wide):not(.resized),
+#panelsGrid > .panel[data-panel="energy-complex"]:not(.span-2):not(.span-3):not(.span-4):not(.panel-wide):not(.resized),
+#panelsGrid > .panel[data-panel="global-procurement"]:not(.span-2):not(.span-3):not(.span-4):not(.panel-wide):not(.resized),
+#panelsGrid > .panel[data-panel="strategic-posture"]:not(.span-2):not(.span-3):not(.span-4):not(.panel-wide):not(.resized),
+#panelsGrid > .panel[data-panel="cascade"]:not(.span-2):not(.span-3):not(.span-4):not(.panel-wide):not(.resized),
+#panelsGrid > .panel[data-panel="live-webcams"]:not(.span-2):not(.span-3):not(.span-4):not(.panel-wide):not(.resized) {
+  height: var(--dashboard-panel-row-max);
+}
+
+/* Offenders that are two-row by default — span-2 defaults and the 2x2
+   .panel-wide pair — get the populated two-row max (2 rows + gap) so their
+   footprint is identical loading vs populated, INCLUDING the deferred-shell
+   phase (the shell carries the same classes, so shell->panel swap is
+   shift-free). The pins apply to NATURAL footprints only: user-resized
+   panels (.resized, PR #5333 review P1) and explicit .span-N overrides keep
+   the resize contract, and the #panelsGrid scope keeps panels dragged into
+   the ultra-wide .map-bottom-grid (height:100%/1fr tracks) on that grid's
+   own sizing contract. */
+#panelsGrid > .panel[data-panel="threat-timeline"].span-2:not(.resized),
+#panelsGrid > .panel[data-panel="gdelt-intel"].span-2:not(.resized),
+#panelsGrid > .panel[data-panel="energy-complex"].span-2:not(.resized),
+#panelsGrid > .panel[data-panel="strategic-posture"].span-2:not(.resized),
+#panelsGrid > .panel[data-panel="global-procurement"].span-2:not(.resized),
+#panelsGrid > .panel[data-panel="live-news"].panel-wide:not(.resized):not(.span-1):not(.span-2):not(.span-3):not(.span-4),
+#panelsGrid > .panel[data-panel="live-webcams"].panel-wide:not(.resized):not(.span-1):not(.span-2):not(.span-3):not(.span-4) {
+  height: calc(var(--dashboard-panel-row-max) * 2 + var(--dashboard-grid-gap));
+}
+
 .panel.span-3 {
   grid-row: span 3 !important;
   min-height: 600px !important;
@@ -10496,6 +10537,100 @@ a.prediction-link:hover {
   color: var(--text-dim);
   margin-top: 4px;
   line-height: 1.3;
+}
+
+/* Global Procurement */
+.global-procurement-controls {
+  display: grid;
+  grid-template-columns: minmax(150px, 2fr) minmax(110px, 1fr) 72px minmax(110px, 1fr) minmax(120px, 1fr) auto auto auto;
+  gap: 6px;
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.global-procurement-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  color: var(--text-dim);
+  font-size: 10px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.global-procurement-toggle input {
+  margin: 0;
+  accent-color: var(--green);
+}
+
+.global-procurement-input,
+.global-procurement-select {
+  min-width: 0;
+  padding: 6px 7px;
+  color: var(--text);
+  background: var(--overlay-subtle);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font: inherit;
+  font-size: 10px;
+}
+
+.global-procurement-input:focus,
+.global-procurement-select:focus {
+  outline: 1px solid var(--green);
+  border-color: var(--green);
+}
+
+.global-procurement-apply,
+.global-procurement-reset {
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  background: var(--overlay-light);
+  cursor: pointer;
+  font-size: 10px;
+}
+
+.global-procurement-apply {
+  color: var(--green);
+  border-color: color-mix(in srgb, var(--green) 40%, var(--border));
+}
+
+.global-procurement-apply:disabled,
+.global-procurement-reset:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.global-procurement-summary {
+  padding: 8px 10px 4px;
+  color: var(--text-dim);
+  font-size: 9px;
+}
+
+.global-procurement-list {
+  padding: 4px 8px 8px;
+}
+
+.global-procurement-card .award-recipient {
+  white-space: normal;
+}
+
+.global-procurement-card a.award-agency {
+  display: inline-block;
+  color: var(--green);
+}
+
+@media (max-width: 900px) {
+  .global-procurement-controls {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .global-procurement-input:first-child {
+    grid-column: 1 / -1;
+  }
 }
 
 /* Trade Policy Panel */

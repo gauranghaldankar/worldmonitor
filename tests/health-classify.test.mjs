@@ -210,6 +210,22 @@ test('issue #5055: validated seed-meta writers are registered in /api/health', (
   }
 });
 
+test('HKO warning snapshots are classified through their matching seed-meta key', () => {
+  assert.equal(STANDALONE_KEYS.hkoWarnings, 'weather:hko-warnings:v1');
+  assert.deepEqual(SEED_META.hkoWarnings, {
+    key: 'seed-meta:weather:hko-warnings',
+    maxStaleMin: 540,
+  });
+
+  const entry = classifyKey('hkoWarnings', STANDALONE_KEYS.hkoWarnings, { allowOnDemand: true },
+    makeCtx({
+      strens: { [STANDALONE_KEYS.hkoWarnings]: 1024 },
+      metaValues: { 'seed-meta:weather:hko-warnings': seedMeta({ recordCount: 1 }) },
+    }));
+
+  assert.equal(entry.status, 'OK');
+});
+
 test('classifyKey: issue #5055 strict seeds surface missing metadata instead of reporting OK', () => {
   const entry = classifyKey('energyPrices', STANDALONE_KEYS.energyPrices, { allowOnDemand: true },
     makeCtx({ strens: { [STANDALONE_KEYS.energyPrices]: 2048 } }));

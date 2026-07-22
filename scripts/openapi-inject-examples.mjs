@@ -379,6 +379,11 @@ function patternString(pattern, key) {
 function stringExample(name, schema = {}, context = {}) {
   const key = normalizeKey(name || context.name || context.operationId);
   const description = String(schema.description ?? context.description ?? '').toLowerCase();
+  const where = `${context.operationId ?? ''} ${context.path ?? ''}`.toLowerCase();
+  // The ODP Patent File Wrapper source cannot populate this compatibility
+  // field. Keep the generated response example truthful instead of emitting
+  // the generic non-empty string placeholder.
+  if (key === 'abstract' && (where.includes('listdefensepatents') || where.includes('list-defense-patents'))) return '';
   const override = overrideStringExample(key, context);
   if (override !== undefined) return constrainedString(override, schema);
   if (shouldUseDescriptionClosedValue(context)) {

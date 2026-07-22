@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import { readFileSync } from 'node:fs';
 import { gzipSync } from 'node:zlib';
 
 import { compactWildfireBootstrapPayload } from '../api/bootstrap.js';
+import { resolveBootstrapRegistry } from '../api/_bootstrap-tier-keys.js';
 import {
   WILDFIRE_DASHBOARD_DETECTION_LIMIT,
+  listFireDetections,
   limitFireDetectionsForDashboard,
 } from '../server/worldmonitor/wildfire/v1/list-fire-detections.ts';
 import { resolveFireDetectionTotalCount } from '../src/services/wildfires/payload.ts';
@@ -30,6 +33,115 @@ function fireDetection(index: number, overrides: Partial<FireDetection> = {}): F
 }
 
 describe('wildfire dashboard payload cap', () => {
+  it('serves the compact RPC payload without reading the canonical seed', async () => {
+    const originalFetch = globalThis.fetch;
+    const originalUrl = process.env.UPSTASH_REDIS_REST_URL;
+    const originalToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+    const requestedKeys: string[] = [];
+    const compactPayload = {
+      fireDetections: [fireDetection(1)],
+      pagination: { nextCursor: '', totalCount: 1_234 },
+      dataAvailable: true,
+    };
+
+    process.env.UPSTASH_REDIS_REST_URL = 'https://redis.test';
+    process.env.UPSTASH_REDIS_REST_TOKEN = 'test-token';
+    globalThis.fetch = async (input) => {
+      const key = decodeURIComponent(new URL(String(input)).pathname.replace('/get/', ''));
+      requestedKeys.push(key);
+      const value = key === 'wildfire:fires-bootstrap:v1'
+        ? compactPayload
+        : key === 'seed-meta:wildfire:fires-bootstrap'
+          ? { fetchedAt: 1_783_500_000_000 }
+          : null;
+      return Response.json({ result: value == null ? null : JSON.stringify(value) });
+    };
+
+    try {
+      const response = await listFireDetections({} as never, {});
+
+      assert.deepEqual(response, {
+        ...compactPayload,
+        fetchedAt: 1_783_500_000_000,
+      });
+      assert.deepEqual(requestedKeys, [
+        'wildfire:fires-bootstrap:v1',
+        'seed-meta:wildfire:fires-bootstrap',
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (originalUrl === undefined) delete process.env.UPSTASH_REDIS_REST_URL;
+      else process.env.UPSTASH_REDIS_REST_URL = originalUrl;
+      if (originalToken === undefined) delete process.env.UPSTASH_REDIS_REST_TOKEN;
+      else process.env.UPSTASH_REDIS_REST_TOKEN = originalToken;
+    }
+  });
+
+  it('falls back to the canonical payload and metadata when the compact seed is missing', async () => {
+    const originalFetch = globalThis.fetch;
+    const originalUrl = process.env.UPSTASH_REDIS_REST_URL;
+    const originalToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+    const requestedKeys: string[] = [];
+    const canonicalDetections = Array.from(
+      { length: WILDFIRE_DASHBOARD_DETECTION_LIMIT + 7 },
+      (_, index) => fireDetection(index),
+    );
+
+    process.env.UPSTASH_REDIS_REST_URL = 'https://redis.test';
+    process.env.UPSTASH_REDIS_REST_TOKEN = 'test-token';
+    globalThis.fetch = async (input) => {
+      const key = decodeURIComponent(new URL(String(input)).pathname.replace('/get/', ''));
+      requestedKeys.push(key);
+      const value = key === 'wildfire:fires:v1'
+        ? { fireDetections: canonicalDetections, dataAvailable: true }
+        : key === 'seed-meta:wildfire:fires'
+          ? { fetchedAt: 1_783_600_000_000 }
+          : null;
+      return Response.json({ result: value == null ? null : JSON.stringify(value) });
+    };
+
+    try {
+      const response = await listFireDetections({} as never, {});
+
+      assert.equal(response.fireDetections.length, WILDFIRE_DASHBOARD_DETECTION_LIMIT);
+      assert.deepEqual(response.pagination, { nextCursor: '', totalCount: canonicalDetections.length });
+      assert.equal(response.fetchedAt, 1_783_600_000_000);
+      assert.equal(response.dataAvailable, true);
+      assert.deepEqual(requestedKeys, [
+        'wildfire:fires-bootstrap:v1',
+        'seed-meta:wildfire:fires-bootstrap',
+        'wildfire:fires:v1',
+        'seed-meta:wildfire:fires',
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (originalUrl === undefined) delete process.env.UPSTASH_REDIS_REST_URL;
+      else process.env.UPSTASH_REDIS_REST_URL = originalUrl;
+      if (originalToken === undefined) delete process.env.UPSTASH_REDIS_REST_TOKEN;
+      else process.env.UPSTASH_REDIS_REST_TOKEN = originalToken;
+    }
+  });
+
+  it('publishes and hydrates a dedicated pre-compacted bootstrap key', () => {
+    const seeder = readFileSync(new URL('../scripts/seed-fire-detections.mjs', import.meta.url), 'utf8');
+    const { cacheKeys } = resolveBootstrapRegistry({ iranEventsEnabled: false });
+
+    assert.match(seeder, /wildfire:fires-bootstrap:v1/);
+    assert.match(seeder, /extraKeys\s*:/);
+    assert.match(seeder, /metaKey:\s*'seed-meta:wildfire:fires-bootstrap'/);
+    assert.equal(cacheKeys.wildfires, 'wildfire:fires-bootstrap:v1');
+    assert.notEqual(cacheKeys.wildfires, 'wildfire:fires:v1');
+  });
+
+  it('packages the shared compactor with the seeder and keeps the Edge mirror in sync', () => {
+    const seeder = readFileSync(new URL('../scripts/seed-fire-detections.mjs', import.meta.url), 'utf8');
+    const scriptsHelper = readFileSync(new URL('../scripts/_wildfire-dashboard.mjs', import.meta.url), 'utf8');
+    const edgeHelper = readFileSync(new URL('../api/_wildfire-dashboard.js', import.meta.url), 'utf8');
+
+    assert.match(seeder, /from '\.\/_wildfire-dashboard\.mjs'/);
+    assert.equal(edgeHelper, scriptsHelper, 'Edge helper mirror must match the scripts-packaged source');
+  });
+
   it('caps response detections without mutating the seed array and keeps highest-signal detections', () => {
     const lowSignal = Array.from({ length: WILDFIRE_DASHBOARD_DETECTION_LIMIT + 25 }, (_, index) =>
       fireDetection(index, {
